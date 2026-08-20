@@ -18,10 +18,10 @@ separately requires claude.ai subscription auth — so the same variable opens o
 gate and closes the other. Verified on Claude Code 2.1.198; see
 ``docs/content/docs/troubleshooting.mdx``.
 
-Access control is filesystem permissions: the parent directory is created
-``0700`` so only the owning user can reach the socket inside it. A socket
-inherits no credentials of its own, so the directory mode *is* the security
-boundary — callers must not point ``--uds`` at a world-writable directory.
+Access control is filesystem permissions. A socket inherits no credentials of
+its own, so the mode of the directory holding it *is* the security boundary.
+A parent this module creates is made ``0700``; a parent that already exists is
+never modified, only checked, since something else owns its policy.
 """
 
 from __future__ import annotations
@@ -105,16 +105,78 @@ def _is_live_socket(path: Path) -> bool:
         sock.close()
 
 
+def _missing_ancestors(target: Path) -> list[Path]:
+    """Directories along *target* that do not exist yet, shallowest first."""
+    missing: list[Path] = []
+    node = target
+    while not node.exists():
+        missing.append(node)
+        if node.parent == node:  # reached the filesystem root
+            break
+        node = node.parent
+    return list(reversed(missing))
+
+
+def _require_safe_existing_parent(parent: Path) -> None:
+    """Reject a pre-existing parent that lets other users swap the socket.
+
+    Deliberately does not repair the mode. The directory predates this call, so
+    something else owns its policy — silently tightening a shared directory
+    would lock out whatever put it there.
+
+    Group/world-writable is tolerated when the sticky bit is set, which is the
+    ``/tmp`` case: others may create their own entries but cannot unlink or
+    rename ours, so the socket cannot be swapped out from under us.
+    """
+    try:
+        mode = parent.stat().st_mode
+    except OSError:
+        return  # unreadable; bind() will produce the authoritative error
+
+    if not mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return
+    if mode & stat.S_ISVTX:
+        return
+
+    raise UdsError(
+        f"{parent} is writable by other users and not sticky, so anyone on this "
+        f"host could replace the socket inside it (mode {stat.S_IMODE(mode):04o}). "
+        "Point --uds at a directory only you can write, or chmod this one to 0700. "
+        "Headroom will not change the permissions of a directory it did not create."
+    )
+
+
+def _prepare_parent_dir(parent: Path) -> None:
+    """Create *parent* ``0700`` if absent; otherwise validate without mutating."""
+    to_create = _missing_ancestors(parent)
+    if not to_create:
+        _require_safe_existing_parent(parent)
+        return
+
+    parent.mkdir(parents=True, exist_ok=True)
+    for created in to_create:
+        # mkdir's mode is masked by the process umask, so set it explicitly --
+        # but only on the directories this call brought into existence.
+        try:
+            created.chmod(0o700)
+        except OSError:
+            pass
+
+
 def prepare_uds_path(path: str | os.PathLike[str], *, platform: str | None = None) -> Path:
     """Validate *path*, create its parent ``0700``, and clear a stale socket.
 
     Returns the resolved path, ready to hand to uvicorn's ``uds=``.
 
+    The parent is created ``0700`` when it does not exist. An existing parent is
+    left exactly as it is -- see :func:`_require_safe_existing_parent`.
+
     Raises :class:`UdsError` when the platform has no Unix sockets, the path is
-    too long for ``sun_path``, something is already listening there, or the path
-    exists as anything other than a socket. That last case matters: a regular
-    file at the target is far more likely to be a typo'd argument pointing at
-    real data than a leftover, so it is never removed.
+    too long for ``sun_path``, an existing parent directory is writable by other
+    users, something is already listening there, or the path exists as anything
+    other than a socket. That last case matters: a regular file at the target is
+    far more likely to be a typo'd argument pointing at real data than a
+    leftover, so it is never removed.
     """
     require_uds_support(platform)
 
@@ -130,14 +192,7 @@ def prepare_uds_path(path: str | os.PathLike[str], *, platform: str | None = Non
             f"sun_path limit: {resolved}. Use a shorter path, e.g. under $TMPDIR."
         )
 
-    parent = resolved.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    try:
-        parent.chmod(0o700)
-    except OSError:
-        # A pre-existing directory we do not own (e.g. a shared /run) cannot be
-        # tightened. Binding still works; the operator owns that trade-off.
-        pass
+    _prepare_parent_dir(resolved.parent)
 
     if resolved.exists() or resolved.is_symlink():
         mode = resolved.lstat().st_mode

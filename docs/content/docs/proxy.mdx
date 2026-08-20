@@ -245,10 +245,16 @@ curl --unix-socket ~/.headroom/run/proxy.sock http://localhost/health
 
 ### Permissions and lifecycle
 
-Headroom creates the socket's parent directory `0700`, so only the owning user can
-reach the socket inside it. A Unix socket carries no credentials of its own, so
-**the directory mode is the access-control boundary** — do not place the socket in
-a world-writable directory such as a bare `/tmp`.
+A Unix socket carries no credentials of its own, so **the mode of the directory
+holding it is the access-control boundary**.
+
+If the parent directory does not exist, Headroom creates it `0700`. If it already
+exists, Headroom does not touch its permissions — something else owns that
+directory's policy, and silently tightening it could lock out whatever put it
+there. Instead it refuses to start when an existing parent is writable by other
+users and not sticky, since anyone on the host could then replace the socket.
+(A sticky directory such as `/tmp` is accepted: others may create their own
+entries there but cannot unlink or rename yours.)
 
 On startup Headroom removes a stale socket left behind by a crashed process, but
 it refuses to start when:

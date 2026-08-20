@@ -19,6 +19,8 @@ from headroom.cli.proxy import proxy as proxy_cmd
 from headroom.proxy.uds import (
     UDS_SUPPORTED,
     UdsError,
+    _missing_ancestors,
+    _require_safe_existing_parent,
     max_uds_path_length,
     prepare_uds_path,
     remove_uds_path,
@@ -75,6 +77,60 @@ def test_cli_rejects_uds_on_windows() -> None:
 
 
 # --------------------------------------------------------------------------
+# Parent-directory policy — pure logic, so it runs on every platform.
+# --------------------------------------------------------------------------
+
+
+def test_missing_ancestors_lists_only_absent_levels(tmp_path: Path) -> None:
+    """Only these get chmod 0700; anything already on disk is left alone."""
+    existing = tmp_path / "existing"
+    existing.mkdir()
+
+    missing = _missing_ancestors(existing / "a" / "b")
+
+    assert missing == [existing / "a", existing / "a" / "b"]
+
+
+def test_missing_ancestors_is_empty_for_an_existing_dir(tmp_path: Path) -> None:
+    assert _missing_ancestors(tmp_path) == []
+
+
+class _FakeStat:
+    def __init__(self, mode: int) -> None:
+        self.st_mode = mode
+
+
+@pytest.mark.parametrize(
+    ("mode", "accepted"),
+    [
+        (0o700, True),  # owner only
+        (0o750, True),  # group may read/traverse, not write
+        (0o755, True),  # the common shared-parent case
+        (0o770, False),  # any group member could swap the socket
+        (0o777, False),  # any local user could
+        (0o1777, True),  # /tmp: sticky, so others cannot unlink ours
+        (0o1770, True),  # sticky group-writable
+    ],
+)
+def test_existing_parent_accepted_only_when_others_cannot_swap_the_socket(
+    tmp_path: Path, mode: int, accepted: bool
+) -> None:
+    """Windows chmod is a no-op, so the mode is injected rather than applied."""
+    with patch.object(Path, "stat", return_value=_FakeStat(stat.S_IFDIR | mode)):
+        if accepted:
+            _require_safe_existing_parent(tmp_path)
+        else:
+            with pytest.raises(UdsError, match="writable by other users"):
+                _require_safe_existing_parent(tmp_path)
+
+
+def test_unreadable_existing_parent_defers_to_bind(tmp_path: Path) -> None:
+    """A stat we cannot perform is not evidence of a problem; let bind() rule."""
+    with patch.object(Path, "stat", side_effect=PermissionError):
+        _require_safe_existing_parent(tmp_path)
+
+
+# --------------------------------------------------------------------------
 # Path preparation — needs a real AF_UNIX platform.
 # --------------------------------------------------------------------------
 
@@ -89,6 +145,66 @@ def test_prepare_creates_parent_owner_only(tmp_path: Path) -> None:
     assert resolved == target
     assert target.parent.is_dir()
     assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
+
+
+@requires_uds
+def test_prepare_preserves_an_existing_parents_mode(tmp_path: Path) -> None:
+    """A caller-owned directory must not be silently tightened to 0700.
+
+    Regression test: `--uds /run/shared/hr.sock` where `/run/shared` is a
+    directory someone else set up at 0755 would have locked out every other
+    user of that directory.
+    """
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o755)
+    bystander = parent / "someone-elses.txt"
+    bystander.write_text("theirs", encoding="utf-8")
+
+    prepare_uds_path(parent / "headroom.sock")
+
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o755
+    assert bystander.read_text(encoding="utf-8") == "theirs"
+
+
+@requires_uds
+def test_prepare_only_chmods_directories_it_creates(tmp_path: Path) -> None:
+    """The 0700 applies to the new levels, not to the existing root above them."""
+    root = tmp_path / "existing"
+    root.mkdir()
+    root.chmod(0o755)
+
+    prepare_uds_path(root / "a" / "b" / "headroom.sock")
+
+    assert stat.S_IMODE(root.stat().st_mode) == 0o755
+    assert stat.S_IMODE((root / "a").stat().st_mode) == 0o700
+    assert stat.S_IMODE((root / "a" / "b").stat().st_mode) == 0o700
+
+
+@requires_uds
+def test_prepare_refuses_a_world_writable_existing_parent(tmp_path: Path) -> None:
+    """Without the sticky bit, any local user could swap the socket out."""
+    parent = tmp_path / "open"
+    parent.mkdir()
+    parent.chmod(0o777)
+
+    with pytest.raises(UdsError, match="writable by other users"):
+        prepare_uds_path(parent / "headroom.sock")
+
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o777, "the refusal must not mutate"
+
+
+@requires_uds
+def test_prepare_accepts_a_sticky_world_writable_parent(tmp_path: Path) -> None:
+    """`/tmp` is 1777: others can add entries but cannot unlink ours."""
+    parent = tmp_path / "sticky"
+    parent.mkdir()
+    parent.chmod(0o1777)
+
+    resolved = prepare_uds_path(parent / "headroom.sock")
+
+    assert resolved.parent == parent
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o1777
 
 
 @requires_uds
