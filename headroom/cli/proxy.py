@@ -1701,16 +1701,13 @@ Memory (Multi-Provider):
     else:
         tuning_section = ""
 
-    # A socket has no URL, and the client-side wiring for it is a different pair
-    # of env vars, so the banner's URL and Usage blocks both switch shape.
+    # A socket has no URL, and no per-agent recipe belongs here — see
+    # uds.socket_usage_lines() for why the banner stays transport-neutral.
     if config.uds:
+        from headroom.proxy.uds import socket_usage_lines
+
         listen_display = f"unix:{config.uds}"
-        usage_section = "\n".join(
-            (
-                f"  Claude Code:   ANTHROPIC_UNIX_SOCKET={config.uds} \\",
-                "                 ANTHROPIC_BASE_URL=http://api.anthropic.com claude",
-            )
-        )
+        usage_section = "\n".join(socket_usage_lines(config.uds))
     else:
         listen_display = f"http://{config.host}:{config.port}"
         usage_section = "\n".join(

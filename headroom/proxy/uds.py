@@ -36,6 +36,7 @@ from pathlib import Path
 __all__ = [
     "UDS_SUPPORTED",
     "UdsError",
+    "socket_usage_lines",
     "max_uds_path_length",
     "prepare_uds_path",
     "remove_uds_path",
@@ -103,6 +104,30 @@ def _is_live_socket(path: Path) -> bool:
         return True
     finally:
         sock.close()
+
+
+# Docs page carrying the client-compatibility detail the banner has no room for.
+UDS_DOCS_URL = "https://headroom-docs.vercel.app/docs/proxy#serving-on-a-unix-socket"
+
+
+def socket_usage_lines(path: str | os.PathLike[str]) -> tuple[str, ...]:
+    """How the startup banner describes a socket bind, for every banner.
+
+    Deliberately names no agent and hands out no environment variables. An
+    earlier revision printed an ``ANTHROPIC_UNIX_SOCKET=... claude`` recipe here,
+    which is a configuration that does not work: it satisfies Claude Code's
+    ``api.anthropic.com`` host check but reclassifies the session as API-key
+    auth, and the session then fails to authenticate. Printing it at startup
+    turned a known-negative result into first-party guidance. The rule this
+    encodes is that the banner states a transport requirement and points at the
+    docs; per-client wiring belongs in the docs, where it can be qualified.
+    """
+    return (
+        f"  Socket:        {path}",
+        "  Client:        must support HTTP over a Unix socket natively",
+        f"  Example:       curl --unix-socket {path} http://localhost/health",
+        f"  Details:       {UDS_DOCS_URL}",
+    )
 
 
 def _missing_ancestors(target: Path) -> list[Path]:

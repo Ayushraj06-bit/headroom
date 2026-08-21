@@ -25,6 +25,7 @@ from headroom.proxy.uds import (
     prepare_uds_path,
     remove_uds_path,
     require_uds_support,
+    socket_usage_lines,
 )
 
 requires_uds = pytest.mark.skipif(
@@ -128,6 +129,46 @@ def test_unreadable_existing_parent_defers_to_bind(tmp_path: Path) -> None:
     """A stat we cannot perform is not evidence of a problem; let bind() rule."""
     with patch.object(Path, "stat", side_effect=PermissionError):
         _require_safe_existing_parent(tmp_path)
+
+
+# --------------------------------------------------------------------------
+# Startup banner — a socket bind must not advertise a broken recipe.
+# --------------------------------------------------------------------------
+
+
+def test_socket_usage_lines_omit_the_unsupported_claude_code_recipe() -> None:
+    """Regression: the banner once printed a configuration that cannot work.
+
+    `ANTHROPIC_UNIX_SOCKET=... claude` passes Claude Code's api.anthropic.com
+    host check but reclassifies the session as API-key auth, and the session
+    then fails to authenticate. Printing it at startup turned a known-negative
+    field result into first-party runtime guidance.
+    """
+    rendered = "\n".join(socket_usage_lines("/run/headroom/proxy.sock"))
+
+    assert "ANTHROPIC_UNIX_SOCKET" not in rendered
+    assert "ANTHROPIC_BASE_URL" not in rendered
+    assert "claude" not in rendered.lower()
+
+
+def test_socket_usage_lines_state_the_transport_requirement() -> None:
+    """What replaces the recipe has to be useful, not merely absent."""
+    path = "/run/headroom/proxy.sock"
+
+    rendered = "\n".join(socket_usage_lines(path))
+
+    assert path in rendered
+    assert "HTTP over a Unix socket" in rendered
+    assert "curl --unix-socket" in rendered
+    assert "serving-on-a-unix-socket" in rendered
+
+
+def test_socket_usage_lines_name_no_agent() -> None:
+    """Transport-neutral: the banner singles out no client."""
+    rendered = "\n".join(socket_usage_lines("/run/headroom/proxy.sock")).lower()
+
+    for agent in ("claude", "codex", "opencode", "cursor", "aider", "copilot"):
+        assert agent not in rendered, f"banner should not name {agent}"
 
 
 # --------------------------------------------------------------------------

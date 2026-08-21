@@ -6199,10 +6199,13 @@ def run_server(
     api_targets = resolve_api_targets(config.provider_api_overrides)
 
     if config.uds:
+        # No per-agent recipe on a socket bind; see uds.socket_usage_lines().
         listen_display = f"unix:{config.uds}"
-        usage_display = f"ANTHROPIC_UNIX_SOCKET={config.uds} claude"
+        usage_label = "Client:     "
+        usage_display = "must support HTTP over a Unix socket natively"
     else:
         listen_display = f"http://{config.host}:{config.port}"
+        usage_label = "Claude Code:"
         usage_display = f"ANTHROPIC_BASE_URL=http://{config.host}:{config.port} claude"
 
     if print_banner:
@@ -6233,7 +6236,7 @@ def run_server(
 ║    Conn Pool:       {pool_info:<52}║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║  USAGE:                                                              ║
-║    Claude Code:   {usage_display:<51}║
+║    {usage_label}   {usage_display:<51}║
 ║    Cursor:        Set base URL in settings                           ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║  ENDPOINTS:                                                          ║
