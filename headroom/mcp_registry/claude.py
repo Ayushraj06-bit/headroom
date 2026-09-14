@@ -100,26 +100,22 @@ class ClaudeRegistrar(MCPRegistrar):
         plugin's ``.mcp.json`` (``claude mcp list`` shows them as
         ``plugin:<plugin>:<server>``). They never appear under ``mcpServers``,
         so :meth:`get_server` cannot see them and Headroom cannot tell that a
-        plugin duplicates an entry it manages (#3570). Read-only. Only
-        user-scope installs are considered: a project-scoped record carries
-        ``projectPath`` and is enabled per project.
+        plugin duplicates an entry it manages (#3570). Read-only.
+
+        Whether Claude launches a plugin is decided by ``enabledPlugins`` as
+        resolved for the current working directory, not by the install
+        record's scope or ``projectPath``; see :func:`_enabled_plugins`.
         """
         installed = _read_json(self._installed_plugins).get("plugins")
         if not isinstance(installed, dict):
             return []
-        enabled = _read_json(self._settings).get("enabledPlugins")
-        if not isinstance(enabled, dict):
-            enabled = {}
+        enabled = _enabled_plugins(Path.cwd(), self._settings)
         found: list[tuple[str, ServerSpec]] = []
         for plugin_id, records in installed.items():
-            # ``claude plugin disable`` flips this flag and keeps the install
-            # record; a disabled plugin does not start its servers.
-            if enabled.get(plugin_id) is False or not isinstance(records, list):
+            if enabled.get(plugin_id) is not True or not isinstance(records, list):
                 continue
             for record in records:
-                if not isinstance(record, dict) or record.get("projectPath"):
-                    continue
-                install_path = record.get("installPath")
+                install_path = record.get("installPath") if isinstance(record, dict) else None
                 if not isinstance(install_path, str) or not install_path:
                     continue
                 entry = _read_plugin_mcp_entry(Path(install_path) / ".mcp.json", server_name)
@@ -339,6 +335,29 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {}
     return data
+
+
+def _enabled_plugins(project_dir: Path, user_settings: Path) -> dict[str, Any]:
+    """Merge ``enabledPlugins`` the way Claude Code resolves it for ``project_dir``.
+
+    Verified against Claude Code 2.1.238: the most specific scope wins
+    (``.claude/settings.local.json`` over ``.claude/settings.json`` in the
+    working directory, over the user ``settings.json``), a plugin with no
+    entry anywhere stays off even when installed, and a subdirectory only
+    counts through its own ``.claude`` settings. ``claude plugin disable``
+    writes ``false`` to one of these files and keeps the install record, so
+    reading all three is what makes that remedy reliably clear a warning.
+    """
+    merged: dict[str, Any] = {}
+    for path in (
+        user_settings,
+        project_dir / ".claude" / "settings.json",
+        project_dir / ".claude" / "settings.local.json",
+    ):
+        flags = _read_json(path).get("enabledPlugins")
+        if isinstance(flags, dict):
+            merged.update(flags)
+    return merged
 
 
 def _read_plugin_mcp_entry(path: Path, server_name: str) -> dict[str, Any] | None:

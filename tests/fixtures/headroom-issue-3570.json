@@ -28,5 +28,14 @@
     "enabledPlugins": {
       "serena@claude-plugins-official": true
     }
+  },
+  "project_scoped_record": {
+    "scope": "project",
+    "installPath": "<installPath>",
+    "version": "da823e86c8fe",
+    "installedAt": "2026-09-14T19:41:37.899Z",
+    "lastUpdated": "2026-09-14T19:41:37.899Z",
+    "gitCommitSha": "da823e86c8feef13b73b6712af11eadd38c992f6",
+    "projectPath": "<projectPath>"
   }
 }
