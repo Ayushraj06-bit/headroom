@@ -509,3 +509,205 @@ def test_register_via_file_merges_into_existing_valid_config(tmp_path: Path) -> 
     assert data["projects"] == {"/x": {"y": 1}}
     assert data["oauthAccount"] == {"id": "abc"}
     assert "headroom" in data["mcpServers"]
+
+
+# ----------------------------------------------------------------------
+# get_plugin_servers() — servers bundled by Claude Code plugins (#3570)
+# ----------------------------------------------------------------------
+
+_ISSUE_3570 = json.loads(
+    (Path(__file__).parents[1] / "fixtures" / "headroom-issue-3570.json").read_text()
+)
+_PLUGIN_ID = _ISSUE_3570["plugin_id"]
+_PLUGIN_SERENA_ARGS = tuple(_ISSUE_3570["plugin_mcp_json"]["serena"]["args"])
+
+
+def _install_plugin(
+    claude_dir: Path,
+    *,
+    plugin_id: str = _PLUGIN_ID,
+    mcp_json: str | None = None,
+    enabled: bool | None = True,
+    records: list[dict] | None = None,
+) -> Path:
+    """Lay out a plugin the way ``claude plugin install`` does under ``claude_dir``.
+
+    Returns the plugin's install path. ``mcp_json`` overrides the raw
+    ``.mcp.json`` text (``None`` writes the fixture's flat-map form).
+    ``enabled=None`` writes no ``enabledPlugins`` entry at all.
+    """
+    install_path = claude_dir / "plugins" / "cache" / "market" / plugin_id / "v1"
+    install_path.mkdir(parents=True, exist_ok=True)
+    if mcp_json is None:
+        mcp_json = json.dumps(_ISSUE_3570["plugin_mcp_json"])
+    (install_path / ".mcp.json").write_text(mcp_json, encoding="utf-8")
+
+    registry = claude_dir / "plugins" / "installed_plugins.json"
+    installed = (
+        json.loads(registry.read_text()) if registry.exists() else {"version": 2, "plugins": {}}
+    )
+    if records is None:
+        record = dict(_ISSUE_3570["installed_plugins_json"]["plugins"][_PLUGIN_ID][0])
+        record["installPath"] = str(install_path)
+        records = [record]
+    installed["plugins"][plugin_id] = records
+    registry.write_text(json.dumps(installed), encoding="utf-8")
+
+    if enabled is not None:
+        settings = claude_dir / "settings.json"
+        data = json.loads(settings.read_text()) if settings.exists() else {}
+        data.setdefault("enabledPlugins", {})[plugin_id] = enabled
+        settings.write_text(json.dumps(data), encoding="utf-8")
+    return install_path
+
+
+def test_get_plugin_servers_empty_without_plugins(tmp_path: Path) -> None:
+    reg = _make_registrar(tmp_path, cli=None)
+    assert reg.get_plugin_servers("serena") == []
+
+
+def test_get_plugin_servers_sees_serena_that_get_server_cannot(tmp_path: Path) -> None:
+    _install_plugin(tmp_path / ".claude")
+    reg = _make_registrar(tmp_path, cli=None)
+
+    assert reg.get_server("serena") is None
+    assert reg.get_plugin_servers("serena") == [
+        (_PLUGIN_ID, ServerSpec(name="serena", command="uvx", args=_PLUGIN_SERENA_ARGS))
+    ]
+
+
+def test_get_plugin_servers_reads_mcp_servers_wrapped_shape(tmp_path: Path) -> None:
+    wrapped = json.dumps({"mcpServers": _ISSUE_3570["plugin_mcp_json"]})
+    _install_plugin(tmp_path / ".claude", mcp_json=wrapped)
+    reg = _make_registrar(tmp_path, cli=None)
+
+    got = reg.get_plugin_servers("serena")
+
+    assert [plugin_id for plugin_id, _ in got] == [_PLUGIN_ID]
+    assert got[0][1].args == _PLUGIN_SERENA_ARGS
+
+
+def test_get_plugin_servers_skips_disabled_plugin(tmp_path: Path) -> None:
+    """``claude plugin disable`` keeps the install record and flips the flag."""
+    _install_plugin(tmp_path / ".claude", enabled=False)
+    reg = _make_registrar(tmp_path, cli=None)
+    assert reg.get_plugin_servers("serena") == []
+
+
+@pytest.mark.parametrize("settings", [None, "{}", '{"enabledPlugins": null}', "not json"])
+def test_get_plugin_servers_treats_missing_flag_as_enabled(
+    tmp_path: Path, settings: str | None
+) -> None:
+    claude_dir = tmp_path / ".claude"
+    _install_plugin(claude_dir, enabled=None)
+    if settings is not None:
+        (claude_dir / "settings.json").write_text(settings, encoding="utf-8")
+    reg = _make_registrar(tmp_path, cli=None)
+    assert [plugin_id for plugin_id, _ in reg.get_plugin_servers("serena")] == [_PLUGIN_ID]
+
+
+def test_get_plugin_servers_skips_project_scoped_record(tmp_path: Path) -> None:
+    claude_dir = tmp_path / ".claude"
+    install_path = claude_dir / "plugins" / "cache" / "market" / _PLUGIN_ID / "v1"
+    _install_plugin(
+        claude_dir,
+        records=[
+            {
+                "scope": "project",
+                "installPath": str(install_path),
+                "projectPath": str(tmp_path / "proj"),
+            }
+        ],
+    )
+    reg = _make_registrar(tmp_path, cli=None)
+    assert reg.get_plugin_servers("serena") == []
+
+
+def test_get_plugin_servers_reports_each_plugin_once(tmp_path: Path) -> None:
+    claude_dir = tmp_path / ".claude"
+    install_path = claude_dir / "plugins" / "cache" / "market" / _PLUGIN_ID / "v1"
+    _install_plugin(
+        claude_dir,
+        records=[
+            {"scope": "user", "installPath": str(install_path)},
+            {"scope": "managed", "installPath": str(install_path)},
+        ],
+    )
+    reg = _make_registrar(tmp_path, cli=None)
+    assert [plugin_id for plugin_id, _ in reg.get_plugin_servers("serena")] == [_PLUGIN_ID]
+
+
+def test_get_plugin_servers_reports_every_plugin_in_registry_order(tmp_path: Path) -> None:
+    claude_dir = tmp_path / ".claude"
+    _install_plugin(claude_dir, plugin_id="serena@other")
+    _install_plugin(claude_dir)
+    reg = _make_registrar(tmp_path, cli=None)
+    got = reg.get_plugin_servers("serena")
+    assert [plugin_id for plugin_id, _ in got] == ["serena@other", _PLUGIN_ID]
+    assert all(spec.args == _PLUGIN_SERENA_ARGS for _, spec in got)
+
+
+def test_get_plugin_servers_matches_only_the_requested_name(tmp_path: Path) -> None:
+    _install_plugin(tmp_path / ".claude")
+    reg = _make_registrar(tmp_path, cli=None)
+    assert reg.get_plugin_servers("headroom") == []
+
+
+def test_get_plugin_servers_reads_explicit_config_dir(tmp_path: Path) -> None:
+    config_dir = tmp_path / "relocated"
+    _install_plugin(config_dir)
+    _install_plugin(tmp_path / ".claude", plugin_id="serena@home")
+    reg = ClaudeRegistrar(claude_cli=None, home_dir=tmp_path, config_dir=config_dir)
+    assert [plugin_id for plugin_id, _ in reg.get_plugin_servers("serena")] == [_PLUGIN_ID]
+
+
+def test_get_plugin_servers_reads_claude_config_dir_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_dir = tmp_path / "relocated"
+    _install_plugin(config_dir)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    reg = ClaudeRegistrar(claude_cli=None)
+    assert [plugin_id for plugin_id, _ in reg.get_plugin_servers("serena")] == [_PLUGIN_ID]
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "",
+        "not json",
+        "[]",
+        '{"plugins": []}',
+        '{"plugins": {"x": {}}}',
+        '{"plugins": {"x": [null]}}',
+        '{"plugins": {"x": [{}]}}',
+        '{"plugins": {"x": [{"installPath": ""}]}}',
+        '{"plugins": {"x": [{"installPath": 5}]}}',
+    ],
+)
+def test_get_plugin_servers_robust_to_bad_registry(tmp_path: Path, contents: str) -> None:
+    registry = tmp_path / ".claude" / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(contents, encoding="utf-8")
+    reg = _make_registrar(tmp_path, cli=None)
+    assert reg.get_plugin_servers("serena") == []
+
+
+@pytest.mark.parametrize(
+    "mcp_json",
+    ["", "not json", "[]", '{"mcpServers": []}', '{"serena": "oops"}', '{"other": {}}'],
+)
+def test_get_plugin_servers_robust_to_bad_plugin_mcp_json(tmp_path: Path, mcp_json: str) -> None:
+    _install_plugin(tmp_path / ".claude", mcp_json=mcp_json)
+    reg = _make_registrar(tmp_path, cli=None)
+    assert reg.get_plugin_servers("serena") == []
+
+
+def test_get_plugin_servers_tolerates_missing_install_path(tmp_path: Path) -> None:
+    _install_plugin(
+        tmp_path / ".claude",
+        records=[{"scope": "user", "installPath": str(tmp_path / "gone")}],
+    )
+    reg = _make_registrar(tmp_path, cli=None)
+    assert reg.get_plugin_servers("serena") == []

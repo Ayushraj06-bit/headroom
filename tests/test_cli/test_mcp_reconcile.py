@@ -289,3 +289,73 @@ def test_mcp_install_force_preserves_user_managed_serena(monkeypatch, tmp_path: 
 
     assert result.exit_code == 0, result.output
     assert json.loads(config.read_text())["mcpServers"]["serena"] == before
+
+
+PLUGIN_FIXTURE = Path(__file__).parents[1] / "fixtures" / "headroom-issue-3570.json"
+
+
+def _install_plugin_serena(tmp_path: Path, *, enabled: bool = True) -> list[Path]:
+    """Mirror ``claude plugin install serena@claude-plugins-official`` on disk.
+
+    Returns the three files Claude Code owns so tests can assert Headroom
+    never touches them.
+    """
+    fixture = json.loads(PLUGIN_FIXTURE.read_text())
+    claude_dir = tmp_path / ".claude"
+    install_path = claude_dir / "plugins" / "cache" / "claude-plugins-official" / "serena" / "v1"
+    install_path.mkdir(parents=True)
+    mcp_json = install_path / ".mcp.json"
+    mcp_json.write_text(json.dumps(fixture["plugin_mcp_json"]))
+    installed = fixture["installed_plugins_json"]
+    installed["plugins"][fixture["plugin_id"]][0]["installPath"] = str(install_path)
+    registry = claude_dir / "plugins" / "installed_plugins.json"
+    registry.write_text(json.dumps(installed))
+    settings = claude_dir / "settings.json"
+    settings.write_text(json.dumps({"enabledPlugins": {fixture["plugin_id"]: enabled}}))
+    return [mcp_json, registry, settings]
+
+
+def test_issue_fixture_plugin_serena_is_reported_base_fail_head_pass(monkeypatch, tmp_path: Path):
+    """#3570: a plugin-provided Serena is invisible to ``get_server`` but must be reported."""
+    config, _ = _setup(monkeypatch, tmp_path)
+    data = json.loads(config.read_text())
+    recommended = build_serena_spec("claude-code")
+    data["mcpServers"]["serena"] = {"command": recommended.command, "args": list(recommended.args)}
+    config.write_text(json.dumps(data))
+    plugin_files = _install_plugin_serena(tmp_path)
+    fixture = json.loads(PLUGIN_FIXTURE.read_text())
+    before = [(p.read_bytes(), os.stat(p).st_mtime_ns) for p in plugin_files]
+
+    result = CliRunner().invoke(main, ["mcp", "reconcile"])
+
+    assert result.exit_code == 0, result.output
+    assert "observed: present" in result.output
+    plugin_cmd = " ".join(["uvx", *fixture["plugin_mcp_json"]["serena"]["args"]])
+    assert f"plugin: {fixture['plugin_id']} also provides a Serena MCP server ({plugin_cmd})" in (
+        result.output
+    )
+    assert f"claude plugin disable {fixture['plugin_id']}" in result.output
+    assert "use --adopt" not in result.output
+    assert [(p.read_bytes(), os.stat(p).st_mtime_ns) for p in plugin_files] == before
+
+
+def test_reconcile_is_quiet_once_plugin_serena_is_disabled(monkeypatch, tmp_path: Path):
+    _setup(monkeypatch, tmp_path)
+    _install_plugin_serena(tmp_path, enabled=False)
+
+    result = CliRunner().invoke(main, ["mcp", "reconcile"])
+
+    assert result.exit_code == 0, result.output
+    assert "plugin:" not in result.output
+    assert "claude plugin disable" not in result.output
+
+
+def test_adopt_leaves_plugin_serena_files_untouched(monkeypatch, tmp_path: Path):
+    _setup(monkeypatch, tmp_path)
+    plugin_files = _install_plugin_serena(tmp_path)
+    before = [p.read_bytes() for p in plugin_files]
+
+    result = CliRunner().invoke(main, ["mcp", "reconcile", "--adopt"])
+
+    assert result.exit_code == 0, result.output
+    assert [p.read_bytes() for p in plugin_files] == before
