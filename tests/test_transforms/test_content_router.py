@@ -1518,6 +1518,167 @@ class TestSmartCrusherFallback:
 
 
 # =============================================================================
+# TestJsonNeverReachesKompress — issue #3673 regression suite
+# =============================================================================
+
+
+def _json_listing(records: int = 5) -> str:
+    """Single-line JSON in the shape of an MCP "list collections" result: a
+    short name plus a long prose description per record, so the mixed-content
+    heuristics see both JSON and prose and SmartCrusher has nothing to minify."""
+    prose = (
+        "This collection provides a comprehensive view of the customers and their "
+        "associated commercial relationships, including loyalty memberships and "
+        "subscription plans that are held with each profile. "
+    ) * 4
+    return json.dumps(
+        {"domains": [{"name": f"collection_{i}", "description": prose} for i in range(records)]},
+        separators=(",", ":"),
+    )
+
+
+class _RecordDroppingKompress:
+    """Kompress stand-in that does what the real model did in #3673: returns
+    shorter, still-valid JSON with one record deleted, plus the CCR marker."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def is_ready(self) -> bool:
+        return True
+
+    def ensure_background_load(self) -> None:
+        raise AssertionError("model is ready; must not fetch")
+
+    def compress(
+        self, content, *, context="", question=None, target_ratio=None, allow_download=True
+    ):
+        self.calls.append(content)
+        try:
+            doc = json.loads(content)
+        except ValueError:
+            doc = None
+        if isinstance(doc, dict) and "domains" in doc:
+            doc["domains"] = doc["domains"][:-1]
+            out = json.dumps(doc, separators=(",", ":")) + "\n[compressed. Retrieve more: hash=abc]"
+        else:
+            out = " ".join(content.split()[::2])
+
+        class Result:
+            compressed = out
+            compressed_tokens = len(out.split())
+
+        return Result()
+
+
+class TestJsonNeverReachesKompress:
+    """A JSON document must never enter the prose compressors (#3673).
+
+    Kompress drops low-information tokens without any notion of JSON grammar,
+    so ``"},{"name":"`` between two records is as droppable to it as a stop
+    word. The output still parses, which is what makes the loss invisible.
+    """
+
+    def test_is_json_document_only_for_objects_and_arrays(self):
+        from headroom.transforms.content_router import _is_json_document
+
+        assert _is_json_document(_json_listing())
+        assert _is_json_document('[{"a": 1}, {"b": 2}]')
+        assert _is_json_document("{}")
+        assert _is_json_document("[]")
+        # Scalars carry no structure to preserve and stay eligible for Kompress.
+        assert not _is_json_document('"just a quoted sentence"')
+        assert not _is_json_document("42")
+        assert not _is_json_document("true")
+        # Not JSON at all.
+        assert not _is_json_document("This is prose. " * 50)
+        assert not _is_json_document('{"truncated": [1, 2, 3')
+        assert not _is_json_document("")
+        # Deep nesting that trips json.loads' recursion limit is "not a document".
+        assert not _is_json_document("[" * 100_000 + "]" * 100_000)
+
+    def test_ml_boundary_passes_json_document_through_untouched(self, router, monkeypatch):
+        import headroom.transforms.content_router as crm
+
+        fake = _RecordDroppingKompress()
+        monkeypatch.setattr(router, "_get_kompress", lambda: fake)
+        content = _json_listing()
+
+        out, tokens = router._try_ml_compressor(content, context="")
+
+        assert out == content
+        assert tokens == crm._estimate_tokens(content)
+        assert fake.calls == [], "a JSON document reached Kompress"
+        assert len(json.loads(out)["domains"]) == 5
+
+    def test_ml_boundary_still_compresses_prose(self, router, monkeypatch):
+        """Control: the guard is specific to JSON documents."""
+        fake = _RecordDroppingKompress()
+        monkeypatch.setattr(router, "_get_kompress", lambda: fake)
+        prose = "This is prose that Kompress is allowed to shorten. " * 40
+
+        out, _tokens = router._try_ml_compressor(prose, context="")
+
+        assert fake.calls == [prose]
+        assert out != prose
+
+    def test_ml_boundary_leaves_json_scalar_eligible(self, router, monkeypatch):
+        fake = _RecordDroppingKompress()
+        monkeypatch.setattr(router, "_get_kompress", lambda: fake)
+        quoted = json.dumps("A quoted sentence is a JSON string, not a document. " * 20)
+
+        router._try_ml_compressor(quoted, context="")
+
+        assert fake.calls == [quoted]
+
+    def test_json_document_skips_size_gate_substitutes(self, monkeypatch):
+        """Above the Kompress token ceiling the boundary reroutes to TextCrusher,
+        which leaves this JSON unparseable; the guard sits in front of that too."""
+        from unittest.mock import MagicMock
+
+        router = ContentRouter(ContentRouterConfig(min_section_tokens=10))
+        router._kompress_max_tokens = 1
+        crusher = MagicMock()
+        crusher.compress.return_value = MagicMock(compressed="{}")
+        monkeypatch.setattr(router, "_get_text_crusher", lambda: crusher)
+        content = _json_listing()
+
+        out, _tokens = router._try_ml_compressor(content, context="")
+
+        assert out == content
+        crusher.compress.assert_not_called()
+
+    def test_smart_crusher_no_savings_keeps_every_record(self, router, monkeypatch):
+        """The reported path: mixed-content split → JSON_ARRAY section →
+        SmartCrusher declines compact JSON → no-savings fallback. The fallback
+        must not hand the document to Kompress."""
+        import json
+        from unittest.mock import MagicMock
+
+        import headroom.transforms.content_router as crm
+        from headroom.transforms.smart_crusher import CrushResult
+
+        content = _json_listing()
+        mock_crusher = MagicMock()
+        mock_crusher.crush.return_value = CrushResult(
+            compressed=content, original=content, was_modified=False, strategy="passthrough"
+        )
+        monkeypatch.setattr(crm.ContentRouter, "_get_smart_crusher", lambda self: mock_crusher)
+        fake = _RecordDroppingKompress()
+        monkeypatch.setattr(router, "_get_kompress", lambda: fake)
+
+        result = router.compress(content)
+
+        assert result.strategy_used == CompressionStrategy.MIXED
+        assert result.compressed == content
+        assert fake.calls == []
+        assert [d["name"] for d in json.loads(result.compressed)["domains"]] == [
+            f"collection_{i}" for i in range(5)
+        ]
+        assert "Retrieve more" not in result.compressed
+
+
+# =============================================================================
 # TestCompressBlockContent — PR #704 shared-path regression
 # =============================================================================
 

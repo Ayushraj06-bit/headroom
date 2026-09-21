@@ -854,6 +854,19 @@ def _content_is_valid_json(content: str) -> bool:
     return True
 
 
+def _is_json_document(content: str) -> bool:
+    """Return True iff ``content`` is one JSON object or array.
+
+    Scalars (``"text"``, ``42``) are not documents: there is no structure
+    to preserve, so they stay eligible for prose compression.
+    """
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        return False
+    return isinstance(parsed, dict | list)
+
+
 def _mixed_indicators(content: str) -> dict[str, bool]:
     return mixed_content_indicators(content)
 
@@ -4126,6 +4139,18 @@ class ContentRouter(Transform):
 
         # If the entire content is custom tags with nothing to compress
         if protected and not cleaned.strip():
+            return content, _estimate_tokens(content)
+
+        # A JSON document never enters the prose compressors. Kompress drops
+        # low-information tokens and has no grammar, so ``"},{"name":"`` is as
+        # droppable to it as a stop word: it deleted one record of five from a
+        # single-line MCP listing and left VALID JSON behind, which no parser,
+        # log line, or model could notice (#3673). The size-gate's TextCrusher
+        # leaves the same document unparseable. Structured JSON belongs to
+        # SmartCrusher; when it declines (compact JSON, short arrays) the
+        # document passes through intact rather than trading its structure for
+        # a few hundred tokens.
+        if _is_json_document(content):
             return content, _estimate_tokens(content)
 
         # Use the cleaned (tag-free) text for compression
