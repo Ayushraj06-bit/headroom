@@ -26,6 +26,7 @@ from headroom.install.runtime import (
     start_persistent_docker,
     stop_runtime,
     wait_ready,
+    wait_stopped,
 )
 
 
@@ -629,6 +630,17 @@ def test_start_stop_wait_and_runtime_status_branches(monkeypatch, tmp_path: Path
     monkeypatch.setattr("headroom.install.runtime.probe_ready", lambda url: False)
     sleeps.clear()
     assert wait_ready(python_manifest, timeout_seconds=2) is False
+    assert sleeps == [1, 1]
+
+    probe_results = iter([True, True, False])
+    sleeps.clear()
+    monkeypatch.setattr("headroom.install.runtime.probe_ready", lambda url: next(probe_results))
+    assert wait_stopped(python_manifest, timeout_seconds=3) is True
+    assert sleeps == [1, 1]
+
+    monkeypatch.setattr("headroom.install.runtime.probe_ready", lambda url: True)
+    sleeps.clear()
+    assert wait_stopped(python_manifest, timeout_seconds=2) is False
     assert sleeps == [1, 1]
 
     class Result:

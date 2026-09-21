@@ -395,6 +395,16 @@ def wait_ready(manifest: DeploymentManifest, timeout_seconds: int = 30) -> bool:
     return False
 
 
+def wait_stopped(manifest: DeploymentManifest, timeout_seconds: int = 15) -> bool:
+    """Wait for the deployment to stop answering its ready endpoint."""
+
+    for _ in range(timeout_seconds):
+        if not probe_ready(manifest.health_url):
+            return True
+        time.sleep(1)
+    return False
+
+
 def runtime_status(manifest: DeploymentManifest) -> str:
     """Return a short status string for the deployment runtime."""
 

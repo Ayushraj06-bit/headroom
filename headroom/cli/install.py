@@ -33,6 +33,7 @@ from headroom.install.runtime import (
     start_persistent_docker,
     stop_runtime,
     wait_ready,
+    wait_stopped,
 )
 from headroom.install.state import (
     ManifestError,
@@ -191,6 +192,15 @@ def _stop_deployment(manifest: DeploymentManifest) -> None:
     if manifest.supervisor_kind == SupervisorKind.SERVICE.value:
         stop_supervisor(manifest)
     stop_runtime(manifest)
+    # `launchctl bootout` returns as soon as the job has been told to go, and a
+    # SIGTERM'd proxy keeps answering /readyz until its event loop notices.
+    # `restart` probes right after this, so a stop that returns early lets
+    # `_start_deployment` mistake the dying runtime for a healthy one and skip
+    # the start (#3658).
+    if not wait_stopped(manifest):
+        raise click.ClickException(
+            f"Deployment '{manifest.profile}' is still answering {manifest.health_url} after stop."
+        )
 
 
 def _deactivate_deployment_mutations(
