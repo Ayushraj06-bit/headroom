@@ -129,12 +129,22 @@ class TestDeepSeekLiteLLMInjection:
             completion_tokens=1_000_000,
         )
         active_pricing = litellm.model_cost["deepseek-v4-flash"]
-        assert input_cost == pytest.approx(
-            active_pricing["input_cost_per_token"] * 1_000_000,
-        )
-        assert output_cost == pytest.approx(
-            active_pricing["output_cost_per_token"] * 1_000_000,
-        )
+        # Upstream now ships an `off_peak_pricing` block for this model and
+        # litellm >= 1.101 bills from it during DeepSeek's off-peak windows
+        # (most weekday hours and all weekend, UTC). cost_per_token therefore
+        # returns one of two rates depending on the wall clock; accept either
+        # so this assertion cannot fail on the time of day alone.
+        off_peak_pricing = active_pricing.get("off_peak_pricing") or {}
+        input_rates = {
+            active_pricing["input_cost_per_token"],
+            off_peak_pricing.get("input_cost_per_token", active_pricing["input_cost_per_token"]),
+        }
+        output_rates = {
+            active_pricing["output_cost_per_token"],
+            off_peak_pricing.get("output_cost_per_token", active_pricing["output_cost_per_token"]),
+        }
+        assert any(input_cost == pytest.approx(rate * 1_000_000) for rate in input_rates)
+        assert any(output_cost == pytest.approx(rate * 1_000_000) for rate in output_rates)
 
     def test_resolve_litellm_model_prefixes_deepseek(self):
         from headroom.pricing.litellm_pricing import resolve_litellm_model
