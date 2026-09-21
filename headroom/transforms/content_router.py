@@ -4025,6 +4025,14 @@ class ContentRouter(Transform):
         Returns:
             Tuple of (compressed, token_count).
         """
+        # Kompress is a prose model: dropping a span around ``},{`` can remove
+        # an entire JSON record while leaving the remaining document valid
+        # (#3673). Keep parseable JSON on the structural/passthrough paths;
+        # malformed JSON is safe to reject here because it cannot cross a
+        # record boundary in the same way.
+        if _content_is_valid_json(content):
+            return content, _estimate_tokens(content)
+
         from .tag_protector import protect_tags, restore_tags
 
         # Protect custom tags before any ML compression

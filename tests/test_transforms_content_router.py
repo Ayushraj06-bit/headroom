@@ -704,6 +704,79 @@ def test_smart_crusher_log_fallback_skipped_for_invalid_json(
     assert CompressionStrategy.KOMPRESS.value in strategy_chain
 
 
+def test_smart_crusher_fallback_skips_kompress_for_valid_json_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kompress must not delete records from parseable single-line JSON (#3673).
+
+    SmartCrusher passes a compact JSON object through when it has no applicable
+    array transform. The no-savings fallback used to hand the whole document to
+    Kompress; when Kompress dropped a span around ``},{``, the result remained
+    valid JSON but silently lost a record.
+    """
+    router = ContentRouter(ContentRouterConfig())
+    payload = json.dumps(
+        {
+            "domains": [
+                {"name": "first", "description": "First collection description"},
+                {"name": "second", "description": "Second collection description"},
+                {"name": "third", "description": "Third collection description"},
+            ]
+        },
+        separators=(",", ":"),
+    )
+    kompress_calls: list[str] = []
+
+    class NoopSmartCrusher:
+        def crush(self, content: str, query: str = "", bias: float = 1.0) -> SimpleNamespace:
+            return SimpleNamespace(compressed=content)
+
+    class RecordEatingKompress:
+        def is_ready(self) -> bool:
+            return True
+
+        def compress(self, content: str, **_kwargs: object) -> SimpleNamespace:
+            kompress_calls.append("kompress")
+            return SimpleNamespace(
+                compressed='{"domains":["record deleted"]}',
+                compressed_tokens=1,
+            )
+
+    monkeypatch.setattr(router, "_get_smart_crusher", lambda: NoopSmartCrusher())
+    monkeypatch.setattr(router, "_get_log_compressor", lambda: None)
+    monkeypatch.setattr(router, "_get_kompress", lambda: RecordEatingKompress())
+
+    result = router.compress(payload)
+
+    assert result.compressed == payload
+    assert kompress_calls == []
+
+
+def test_force_kompress_skips_valid_json_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The forced-Kompress fast path keeps the same parseable-JSON guard."""
+    router = ContentRouter(ContentRouterConfig(force_kompress_all=True))
+    router._runtime_force_kompress = True
+    payload = json.dumps({"items": [{"id": 1}, {"id": 2}]}, separators=(",", ":"))
+    calls: list[str] = []
+
+    class RecordEatingKompress:
+        def is_ready(self) -> bool:
+            return True
+
+        def compress(self, content: str, **_kwargs: object) -> SimpleNamespace:
+            calls.append("kompress")
+            return SimpleNamespace(compressed='{"items":[{"id":1}]}', compressed_tokens=1)
+
+    monkeypatch.setattr(router, "_get_kompress", lambda: RecordEatingKompress())
+
+    result = router.compress(payload)
+
+    assert calls == []
+    assert result.compressed == payload
+
+
 def test_smart_crusher_log_fallback_runs_for_valid_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
