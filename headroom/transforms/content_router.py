@@ -90,7 +90,7 @@ from .lossless_provider import (
     get_lossless_verifier,
 )
 from .mixed_content import ContentSection, mixed_content_indicators
-from .relevance_split import build_relevance_query, plan_relevance_split
+from .relevance_split import build_relevance_query, plan_relevance_split, segment
 
 logger = logging.getLogger(__name__)
 
@@ -853,23 +853,65 @@ def _content_is_valid_json(content: str) -> bool:
     return True
 
 
-def _contains_valid_json_span(content: str) -> bool:
-    """Return True when the block is, or contains, a parseable JSON container.
+def _protected_json_spans(content: str) -> list[tuple[int, int]]:
+    """JSON spans of ``content`` that a prose model must not be handed (#3673).
 
-    Kompress is a prose model, so any JSON bytes in its input are at risk of a
-    destructive span around ``},{``. Whole-block checks miss prefixed tool
-    output and fragments cut through a larger JSON document. Reuse the
-    deterministic balanced-span scan used by embedded-JSON routing and validate
-    each candidate span with ``json.loads``.
+    Kompress has no notion of JSON grammar, so JSON bytes in its input are at
+    risk of a destructive span around ``},{``. The scan is the deterministic
+    balanced-span walk embedded-JSON routing already uses, so prefixed tool
+    output and relevance fragments are seen too. Two shapes qualify:
+
+    * a span carrying an array of objects — deleting the ``},{`` between two
+      records leaves VALID JSON, so the loss is invisible to every parser, log
+      line and model downstream, which is what made #3673 invisible;
+    * a block that is one JSON document end to end, which covers welding two
+      keys of a lone object by the same argument.
+
+    A stream of SEPARATE top-level values (search hits as space-joined objects,
+    JSONL) is deliberately not protected. Welding two of those yields an
+    unparseable record rather than a silently shorter document, so the
+    invisible-loss argument does not apply — and protecting them costs a large,
+    legitimate savings class: it turns forced Kompress into a no-op on a
+    160-object search payload (see
+    ``test_force_kompress_routes_anthropic_tool_result_to_targeted_kompress``).
     """
-    if _content_is_valid_json(content):
-        return True
+    from .recursive_json import carries_record_array, json_document_spans
 
-    from .recursive_json import _spans
+    spans = json_document_spans(content)
+    if not spans:
+        return []
+    if (
+        len(spans) == 1
+        and not content[: spans[0][0]].strip()
+        and not content[spans[0][1] :].strip()
+    ):
+        return spans
+    return [(a, b) for a, b in spans if carries_record_array(content[a:b])]
 
-    return any(
-        _content_is_valid_json(content[start:end]) for start, end in _spans(content)
-    )
+
+def _contains_protected_json(content: str) -> bool:
+    """True when ``content`` is, or contains, a JSON span worth protecting."""
+    return bool(_protected_json_spans(content))
+
+
+def _json_straddles_segments(content: str) -> bool:
+    """True when a protected JSON span crosses a boundary ``segment()`` cuts at.
+
+    The relevance split windows by line with no JSON awareness, so a payload
+    misclassified as LOG/SEARCH can be cut mid-structure and the pieces handed
+    to Kompress as fragments no span check can recognise. Declining only for a
+    straddling span keeps the split working on line-contained JSON (JSONL
+    logs), which is the shape it exists for.
+    """
+    spans = _protected_json_spans(content)
+    if not spans:
+        return False
+    cuts: list[int] = []
+    offset = 0
+    for piece in segment(content)[:-1]:
+        offset += len(piece)
+        cuts.append(offset)
+    return any(a < cut < b for a, b in spans for cut in cuts)
 
 
 def _mixed_indicators(content: str) -> dict[str, bool]:
@@ -4049,7 +4091,7 @@ class ContentRouter(Transform):
         # (#3673). This boundary sees the final Kompress input, which may be a
         # prefixed block or a fragment rather than a whole JSON document, so
         # guard every parseable JSON span before the prose model runs.
-        if _contains_valid_json_span(content):
+        if _contains_protected_json(content):
             return content, _estimate_tokens(content)
 
         from .tag_protector import protect_tags, restore_tags
@@ -4382,9 +4424,10 @@ class ContentRouter(Transform):
         normal path when the scorer is unavailable, the query is empty, nothing
         is dropped, or the split doesn't beat plain compaction. Never raises.
 
-        JSON is excluded from windowed splitting. Without that route guard, a
-        JSON payload misclassified as LOG/SEARCH can be cut at arbitrary offsets
-        before the JSON guard sees it (#3673).
+        JSON the windows would cut is excluded from splitting. Without that
+        route guard, a payload misclassified as LOG/SEARCH is cut at arbitrary
+        offsets before the JSON guard sees it (#3673); line-contained JSON
+        (JSONL) still splits, which is the shape this exists for.
 
         Embedding cost is bounded two ways: the model is pre-warmed off the
         request thread (BM25 until it's ready, see _get_relevance_scorer) and
@@ -4394,7 +4437,7 @@ class ContentRouter(Transform):
         scorer = self._get_relevance_scorer()
         if scorer is None or not query.strip():
             return None
-        if _contains_valid_json_span(content):
+        if _json_straddles_segments(content):
             return None
         from .lossless_compaction import compact_lossless
 

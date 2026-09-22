@@ -6,7 +6,11 @@ from __future__ import annotations
 
 import json
 
-from headroom.transforms.recursive_json import route_embedded_json
+from headroom.transforms.recursive_json import (
+    carries_record_array,
+    json_document_spans,
+    route_embedded_json,
+)
 
 
 def _upper_dispatch(span: str) -> str | None:
@@ -65,3 +69,35 @@ def test_scalar_array_not_routed() -> None:
     # array of scalars is not a "routable" JSON shape (no dict rows)
     content = "nums: [1,2,3,4,5,6,7,8] done"
     assert route_embedded_json(content, _upper_dispatch) is None
+
+
+def test_json_document_spans_finds_containers_anywhere() -> None:
+    doc = json.dumps({"domains": [{"name": "a"}, {"name": "b"}]})
+    arr = json.dumps([1, 2, 3])
+    text = "Tool result: " + doc + " and a list " + arr + " done"
+    assert [text[a:b] for a, b in json_document_spans(text)] == [doc, arr]
+
+
+def test_json_document_spans_ignores_scalars_prose_and_unbalanced_json() -> None:
+    assert json_document_spans('"just a quoted sentence"') == []
+    assert json_document_spans("42") == []
+    assert json_document_spans("prose with a [note] and {braces} but no JSON") == []
+    assert json_document_spans('{"truncated": [1, 2, 3') == []
+    assert json_document_spans("{{HEADROOM_TAG_0}}") == []
+    assert json_document_spans("") == []
+
+
+def test_json_document_spans_whole_document() -> None:
+    doc = json.dumps({"a": [1, 2]})
+    assert json_document_spans(doc) == [(0, len(doc))]
+    assert json_document_spans("  " + doc + "\n") == [(2, 2 + len(doc))]
+
+
+def test_carries_record_array_separates_the_two_shapes() -> None:
+    assert carries_record_array(json.dumps({"domains": [{"name": "a"}, {"name": "b"}]}))
+    assert carries_record_array(json.dumps([{"id": 1}, {"id": 2}]))
+    # A lone object, or an array of scalars, has no record delimiter whose
+    # deletion leaves a valid-but-shorter document.
+    assert not carries_record_array(json.dumps({"file": "src/mod.py", "line": 1}))
+    assert not carries_record_array(json.dumps([1, 2, 3]))
+    assert not carries_record_array(json.dumps([{"id": 1}]))

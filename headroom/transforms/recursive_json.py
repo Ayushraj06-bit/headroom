@@ -86,10 +86,26 @@ def _spans(text: str) -> list[tuple[int, int]]:
     return out
 
 
-def _has_routable_json(span: str) -> bool:
+def json_document_spans(text: str) -> list[tuple[int, int]]:
+    """``(start, end)`` of every top-level balanced span of ``text`` that parses
+    as a JSON object or array, left to right. Scalars are not documents; a
+    whole-document ``text`` yields one span covering it (modulo whitespace)."""
+    out: list[tuple[int, int]] = []
+    for a, b in _spans(text):
+        try:
+            parsed = json.loads(text[a:b])
+        except (ValueError, TypeError, RecursionError):
+            continue
+        if isinstance(parsed, dict | list):
+            out.append((a, b))
+    return out
+
+
+def carries_record_array(span: str) -> bool:
     """True if ``span`` parses and contains an array of objects somewhere — the
-    shape the JSON compressors actually act on. Cheap structural check, no size
-    threshold."""
+    shape the JSON compressors act on, and the one whose record delimiters a
+    prose model can delete while leaving valid JSON behind (#3673). Cheap
+    structural check, no size threshold."""
     try:
         v = json.loads(span)
     except (ValueError, TypeError):
@@ -141,7 +157,7 @@ def route_embedded_json(
         chunk = content[a:b]
         if "<<ccr:" in chunk:  # R1: already compressed — never re-route
             continue
-        if not _has_routable_json(chunk):
+        if not carries_record_array(chunk):
             continue
         out = dispatch(chunk)
         if out is None or out == chunk:
