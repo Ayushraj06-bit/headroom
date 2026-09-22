@@ -12511,12 +12511,17 @@ function withNodeImportOption(existing, shim) {
   }
   return parts.join(" ");
 }
+function withExcludeHostsEnv(env, excludeHosts) {
+  if (excludeHosts.length > 0) {
+    env[EXCLUDE_HOSTS_ENV] = excludeHosts.join(",");
+  } else {
+    delete env[EXCLUDE_HOSTS_ENV];
+  }
+}
 function withShimEnv(env, proxyUrl, excludeHosts) {
   const nextEnv = { ...env ?? process.env };
   nextEnv[PROXY_ENV] = proxyUrl;
-  if (excludeHosts.length > 0) {
-    nextEnv[EXCLUDE_HOSTS_ENV] = excludeHosts.join(",");
-  }
+  withExcludeHostsEnv(nextEnv, excludeHosts);
   const shim = shimImportSpecifier();
   if (shim) {
     nextEnv.NODE_OPTIONS = withNodeImportOption(nextEnv.NODE_OPTIONS, shim);
@@ -12525,9 +12530,7 @@ function withShimEnv(env, proxyUrl, excludeHosts) {
 }
 function installProcessEnv(proxyUrl, excludeHosts) {
   process.env[PROXY_ENV] = proxyUrl;
-  if (excludeHosts.length > 0) {
-    process.env[EXCLUDE_HOSTS_ENV] = excludeHosts.join(",");
-  }
+  withExcludeHostsEnv(process.env, excludeHosts);
   const shim = shimImportSpecifier();
   if (shim) {
     process.env.NODE_OPTIONS = withNodeImportOption(process.env.NODE_OPTIONS, shim);

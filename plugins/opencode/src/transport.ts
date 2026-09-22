@@ -90,6 +90,18 @@ function withNodeImportOption(existing: string | undefined, shim: string): strin
   return parts.join(" ");
 }
 
+// The exported variable mirrors the EFFECTIVE list, not merely a non-empty
+// one: an explicit `excludeHosts: []` overrides a pre-existing variable for
+// this process, so a child that inherited the stale value would bypass hosts
+// the parent routes. Delete it when the resolved list is empty.
+function withExcludeHostsEnv(env: NodeJS.ProcessEnv, excludeHosts: string[]): void {
+  if (excludeHosts.length > 0) {
+    env[EXCLUDE_HOSTS_ENV] = excludeHosts.join(",");
+  } else {
+    delete env[EXCLUDE_HOSTS_ENV];
+  }
+}
+
 function withShimEnv(
   env: NodeJS.ProcessEnv | Record<string, unknown> | undefined,
   proxyUrl: string,
@@ -97,9 +109,7 @@ function withShimEnv(
 ): NodeJS.ProcessEnv {
   const nextEnv = { ...(env ?? process.env) } as NodeJS.ProcessEnv;
   nextEnv[PROXY_ENV] = proxyUrl;
-  if (excludeHosts.length > 0) {
-    nextEnv[EXCLUDE_HOSTS_ENV] = excludeHosts.join(",");
-  }
+  withExcludeHostsEnv(nextEnv, excludeHosts);
   const shim = shimImportSpecifier();
   if (shim) {
     nextEnv.NODE_OPTIONS = withNodeImportOption(nextEnv.NODE_OPTIONS, shim);
@@ -109,9 +119,7 @@ function withShimEnv(
 
 function installProcessEnv(proxyUrl: string, excludeHosts: string[]): void {
   process.env[PROXY_ENV] = proxyUrl;
-  if (excludeHosts.length > 0) {
-    process.env[EXCLUDE_HOSTS_ENV] = excludeHosts.join(",");
-  }
+  withExcludeHostsEnv(process.env, excludeHosts);
   const shim = shimImportSpecifier();
   if (shim) {
     process.env.NODE_OPTIONS = withNodeImportOption(process.env.NODE_OPTIONS, shim);
