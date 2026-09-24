@@ -371,10 +371,6 @@ class ProxyConfig:
     # (repeatable); env: HEADROOM_COMPRESSORS.
     compressors: set[str] | None = None
 
-    # Fallback
-    fallback_enabled: bool = False
-    fallback_provider: str | None = None
-
     # Timeouts
     request_timeout_seconds: int = 300
     connect_timeout_seconds: int = 10
