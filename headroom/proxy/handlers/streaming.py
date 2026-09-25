@@ -30,6 +30,7 @@ import httpx
 from headroom.copilot_auth import apply_copilot_api_auth
 from headroom.proxy.stream_output_tokens import estimate_output_tokens
 from headroom.proxy.thinking_tokens import ThinkingTokens, extract_thinking_tokens
+from headroom.utils import format_exception_message
 
 logger = logging.getLogger("headroom.proxy")
 
@@ -2018,10 +2019,11 @@ class StreamingMixin:
                         logger.error(f"[{request_id}] Bedrock stream error: {event.data}")
 
             except Exception as e:
-                logger.error(f"[{request_id}] Bedrock streaming error: {e}")
+                error_message = format_exception_message(e)
+                logger.error(f"[{request_id}] Bedrock streaming error: {error_message}")
                 error_event = {
                     "type": "error",
-                    "error": {"type": "api_error", "message": str(e)},
+                    "error": {"type": "api_error", "message": error_message},
                 }
                 yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode()
 
