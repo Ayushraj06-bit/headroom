@@ -7912,13 +7912,13 @@ def opencode(
         headroom wrap opencode --copilot-subscription # Use a GitHub Copilot subscription
         headroom wrap opencode --openai-api-url https://api.deepseek.com/v1
 
-    
+    \b
     Without --openai-api-url the proxy forwards OpenAI-compatible traffic to
     https://api.openai.com/v1, so a third-party key (DeepSeek, Together,
     OpenRouter, ...) is rejected upstream with OpenAI's 401 "Incorrect API key
     provided". Point the proxy at the real upstream instead:
 
-    
+    \b
         headroom wrap opencode --openai-api-url https://api.deepseek.com/v1
         OPENAI_TARGET_API_URL=https://api.deepseek.com/v1 headroom wrap opencode
     """
