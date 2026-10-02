@@ -12,7 +12,6 @@ from headroom.providers.copilot.vscode import (
     unrouted_vscode_profiles,
     vscode_proxy_url,
     vscode_settings_path,
-    vscode_user_dir,
 )
 
 
@@ -112,17 +111,16 @@ def test_configure_refuses_duplicate_managed_markers(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == original
 
 
-def _write_profiles(tmp_path: Path, state: object) -> tuple[dict[str, str], Path]:
-    env = {"APPDATA": str(tmp_path)}
-    user_dir = vscode_user_dir(platform="win32", environ=env)
+def _write_profiles(tmp_path: Path, state: object) -> Path:
+    user_dir = tmp_path / "User"
     storage = user_dir / "globalStorage" / "storage.json"
     storage.parent.mkdir(parents=True)
     storage.write_text(state if isinstance(state, str) else json.dumps(state), encoding="utf-8")
-    return env, user_dir
+    return user_dir
 
 
 def test_unrouted_profiles_lists_only_profiles_with_their_own_settings(tmp_path: Path) -> None:
-    env, user_dir = _write_profiles(
+    user_dir = _write_profiles(
         tmp_path,
         {
             "userDataProfiles": [
@@ -136,29 +134,77 @@ def test_unrouted_profiles_lists_only_profiles_with_their_own_settings(tmp_path:
         },
     )
 
-    assert unrouted_vscode_profiles(platform="win32", environ=env) == [
+    assert unrouted_vscode_profiles(user_dir) == [
         ("Work", user_dir / "profiles" / "6c87cdb4" / "settings.json"),
         ("Negative hash", user_dir / "profiles" / "-1f2e3d" / "settings.json"),
     ]
 
 
-def test_unrouted_profiles_skips_a_profile_already_configured(tmp_path: Path) -> None:
-    env, user_dir = _write_profiles(
+@pytest.mark.parametrize("managed", [True, False])
+def test_unrouted_profiles_skips_a_profile_that_overrides_both_endpoints(
+    tmp_path: Path, managed: bool
+) -> None:
+    user_dir = _write_profiles(
         tmp_path, {"userDataProfiles": [{"location": "6c87cdb4", "name": "Work"}]}
     )
     profile_settings = user_dir / "profiles" / "6c87cdb4" / "settings.json"
     profile_settings.parent.mkdir(parents=True)
-    configure_vscode_proxy_settings(profile_settings, "http://127.0.0.1:8787")
+    if managed:
+        configure_vscode_proxy_settings(profile_settings, "http://127.0.0.1:8787")
+    else:
+        profile_settings.write_text(
+            """{
+    "github.copilot.advanced.debug.overrideProxyUrl": "http://127.0.0.1:8787",
+    "github.copilot.advanced.debug.overrideCapiUrl": "http://127.0.0.1:8787",
+}
+""",
+            encoding="utf-8",
+        )
 
-    assert unrouted_vscode_profiles(platform="win32", environ=env) == []
+    assert unrouted_vscode_profiles(user_dir) == []
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        # The marker is itself a comment, so on its own it proves nothing.
+        """{
+    // --- Headroom Copilot proxy ---
+}
+""",
+        """{
+    // --- Headroom Copilot proxy ---
+    // "github.copilot.advanced.debug.overrideProxyUrl": "http://127.0.0.1:8787",
+    // "github.copilot.advanced.debug.overrideCapiUrl": "http://127.0.0.1:8787"
+    // --- end Headroom Copilot proxy ---
+}
+""",
+        """{
+    "note": "// --- Headroom Copilot proxy ---",
+    "github.copilot.advanced.debug.overrideCapiUrl": "http://127.0.0.1:8787"
+}
+""",
+        '{ "github.copilot.advanced.debug.overrideCapiUrl": ',
+    ],
+    ids=["marker-only", "commented-out-keys", "one-key", "unparseable"],
+)
+def test_unrouted_profiles_counts_only_live_override_settings(
+    tmp_path: Path, settings: str
+) -> None:
+    user_dir = _write_profiles(
+        tmp_path, {"userDataProfiles": [{"location": "6c87cdb4", "name": "Work"}]}
+    )
+    profile_settings = user_dir / "profiles" / "6c87cdb4" / "settings.json"
+    profile_settings.parent.mkdir(parents=True)
+    profile_settings.write_text(settings, encoding="utf-8")
+
+    assert unrouted_vscode_profiles(user_dir) == [("Work", profile_settings)]
 
 
 @pytest.mark.parametrize("state", ["{not json", [], {"userDataProfiles": {"a": 1}}, {}])
 def test_unrouted_profiles_tolerates_unexpected_vscode_state(tmp_path: Path, state: object) -> None:
-    env, _ = _write_profiles(tmp_path, state)
-
-    assert unrouted_vscode_profiles(platform="win32", environ=env) == []
+    assert unrouted_vscode_profiles(_write_profiles(tmp_path, state)) == []
 
 
 def test_unrouted_profiles_without_vscode_state(tmp_path: Path) -> None:
-    assert unrouted_vscode_profiles(platform="win32", environ={"APPDATA": str(tmp_path)}) == []
+    assert unrouted_vscode_profiles(tmp_path) == []

@@ -6642,13 +6642,12 @@ def vscode_copilot(
                 vscode_proxy_url(actual_port, _project_name_from_cwd()),
             )
             click.echo(f"  VS Code Copilot proxy settings {action}: {target_settings}")
-            if settings_file is None:
-                for name, profile_settings in unrouted_vscode_profiles():
-                    click.echo(
-                        f"  Warning: VS Code profile '{name}' keeps its own settings, so Copilot "
-                        "there still bypasses Headroom. Route it with: headroom wrap vscode "
-                        f'--settings-file "{profile_settings}"'
-                    )
+            for name, profile_settings in unrouted_vscode_profiles(target_settings.parent):
+                click.echo(
+                    f"  Warning: VS Code profile '{name}' keeps its own settings, so Copilot "
+                    "there still bypasses Headroom. Route it with: headroom wrap vscode "
+                    f'--settings-file "{profile_settings}"'
+                )
             click.echo(
                 "  Keep using Copilot's normal model picker; the selected model is preserved."
             )
