@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 from headroom.cli.main import main
@@ -44,6 +46,55 @@ def test_wrap_vscode_configures_actual_port_and_seeds_subscription(tmp_path: Pat
     assert "normal model picker" in result.output
     assert captured["openai_api_url"] == "https://api.githubcopilot.com"
     assert captured["copilot_api_token"] == "copilot-token"
+
+
+def test_wrap_vscode_names_profiles_that_ignore_default_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for var in ("APPDATA", "HOME", "USERPROFILE", "XDG_CONFIG_HOME"):
+        monkeypatch.setenv(var, str(tmp_path))
+    from headroom.providers.copilot.vscode import vscode_user_dir
+
+    user_dir = vscode_user_dir()
+    storage = user_dir / "globalStorage" / "storage.json"
+    storage.parent.mkdir(parents=True)
+    storage.write_text(
+        json.dumps(
+            {
+                "userDataProfiles": [
+                    {"location": "6c87cdb4", "name": "Work"},
+                    {"location": "1a2b", "name": "Shared", "useDefaultFlags": {"settings": True}},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_watcher(**kwargs):  # noqa: ANN003, ANN202
+        kwargs["print_setup_lines"](8787)
+
+    with (
+        patch(
+            "headroom.cli.wrap._require_copilot_subscription_resolution", return_value=_resolution()
+        ),
+        patch("headroom.cli.wrap._run_proxy_only_watcher", side_effect=fake_watcher),
+    ):
+        result = CliRunner().invoke(main, ["wrap", "vscode"])
+        # Naming a file explicitly is the remedy itself, so it must not warn.
+        explicit = CliRunner().invoke(
+            main, ["wrap", "vscode", "--settings-file", str(tmp_path / "chosen.json")]
+        )
+
+    assert explicit.exit_code == 0, explicit.output
+    assert "Warning" not in explicit.output
+    assert result.exit_code == 0, result.output
+    assert "overrideCapiUrl" in (user_dir / "settings.json").read_text(encoding="utf-8")
+    # A window in the "Work" profile reads only its own settings.json, so the
+    # block above never reaches it; say so instead of reporting plain success.
+    assert "VS Code profile 'Work'" in result.output
+    assert str(user_dir / "profiles" / "6c87cdb4" / "settings.json") in result.output
+    # A profile that shares the Default profile's settings already sees the block.
+    assert "Shared" not in result.output
 
 
 def test_wrap_vscode_no_configure_prints_transparent_settings(tmp_path: Path) -> None:

@@ -59,6 +59,46 @@ def vscode_settings_path(
     return vscode_user_dir(platform=platform, environ=environ) / "settings.json"
 
 
+def unrouted_vscode_profiles(
+    *, platform: str | None = None, environ: Mapping[str, str] | None = None
+) -> list[tuple[str, Path]]:
+    """Return ``(name, settings.json)`` for profiles that cannot see Headroom's block.
+
+    A window in a profile with its own settings reads only that profile's
+    settings.json, and Copilot takes its endpoint overrides from user settings
+    alone, so the block in the Default profile's file never reaches it.
+    """
+    user_dir = vscode_user_dir(platform=platform, environ=environ)
+    try:
+        state = json.loads(
+            (user_dir / "globalStorage" / "storage.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return []
+    profiles = state.get("userDataProfiles") if isinstance(state, dict) else None
+    unrouted: list[tuple[str, Path]] = []
+    for profile in profiles if isinstance(profiles, list) else []:
+        if not isinstance(profile, dict):
+            continue
+        flags = profile.get("useDefaultFlags")
+        location = profile.get("location")
+        # VS Code names local profile folders hash(uuid).toString(16); any other
+        # location (a remote URI) is not a folder under profiles/.
+        if (isinstance(flags, dict) and flags.get("settings")) or not (
+            isinstance(location, str) and re.fullmatch(r"[\w-]+", location)
+        ):
+            continue
+        path = user_dir / "profiles" / location / "settings.json"
+        try:
+            if _MARKER_START in _read_settings(path):
+                continue
+        except (OSError, ValueError):
+            pass
+        name = profile.get("name")
+        unrouted.append((name if isinstance(name, str) else location, path))
+    return unrouted
+
+
 def vscode_proxy_url(port: int, project: str | None = None) -> str:
     """Return the transparent Copilot endpoint override for a Headroom proxy."""
     return str(with_project_prefix(f"http://127.0.0.1:{port}", project))

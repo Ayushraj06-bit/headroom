@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import click
@@ -8,8 +9,10 @@ import pytest
 from headroom.providers.copilot.vscode import (
     configure_vscode_proxy_settings,
     remove_vscode_proxy_settings,
+    unrouted_vscode_profiles,
     vscode_proxy_url,
     vscode_settings_path,
+    vscode_user_dir,
 )
 
 
@@ -107,3 +110,55 @@ def test_configure_refuses_duplicate_managed_markers(tmp_path: Path) -> None:
     with pytest.raises(click.ClickException, match="marker block"):
         configure_vscode_proxy_settings(path, "http://127.0.0.1:8787")
     assert path.read_text(encoding="utf-8") == original
+
+
+def _write_profiles(tmp_path: Path, state: object) -> tuple[dict[str, str], Path]:
+    env = {"APPDATA": str(tmp_path)}
+    user_dir = vscode_user_dir(platform="win32", environ=env)
+    storage = user_dir / "globalStorage" / "storage.json"
+    storage.parent.mkdir(parents=True)
+    storage.write_text(state if isinstance(state, str) else json.dumps(state), encoding="utf-8")
+    return env, user_dir
+
+
+def test_unrouted_profiles_lists_only_profiles_with_their_own_settings(tmp_path: Path) -> None:
+    env, user_dir = _write_profiles(
+        tmp_path,
+        {
+            "userDataProfiles": [
+                {"location": "6c87cdb4", "name": "Work"},
+                {"location": "-1f2e3d", "name": "Negative hash"},
+                {"location": "aa11", "name": "Shared", "useDefaultFlags": {"settings": True}},
+                {"location": "../escape", "name": "Traversal"},
+                {"location": {"scheme": "vscode-remote", "path": "/p"}, "name": "Remote"},
+                "not-a-profile",
+            ]
+        },
+    )
+
+    assert unrouted_vscode_profiles(platform="win32", environ=env) == [
+        ("Work", user_dir / "profiles" / "6c87cdb4" / "settings.json"),
+        ("Negative hash", user_dir / "profiles" / "-1f2e3d" / "settings.json"),
+    ]
+
+
+def test_unrouted_profiles_skips_a_profile_already_configured(tmp_path: Path) -> None:
+    env, user_dir = _write_profiles(
+        tmp_path, {"userDataProfiles": [{"location": "6c87cdb4", "name": "Work"}]}
+    )
+    profile_settings = user_dir / "profiles" / "6c87cdb4" / "settings.json"
+    profile_settings.parent.mkdir(parents=True)
+    configure_vscode_proxy_settings(profile_settings, "http://127.0.0.1:8787")
+
+    assert unrouted_vscode_profiles(platform="win32", environ=env) == []
+
+
+@pytest.mark.parametrize("state", ["{not json", [], {"userDataProfiles": {"a": 1}}, {}])
+def test_unrouted_profiles_tolerates_unexpected_vscode_state(tmp_path: Path, state: object) -> None:
+    env, _ = _write_profiles(tmp_path, state)
+
+    assert unrouted_vscode_profiles(platform="win32", environ=env) == []
+
+
+def test_unrouted_profiles_without_vscode_state(tmp_path: Path) -> None:
+    assert unrouted_vscode_profiles(platform="win32", environ={"APPDATA": str(tmp_path)}) == []
