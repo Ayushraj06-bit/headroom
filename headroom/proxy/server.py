@@ -3060,9 +3060,9 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     # Installed here (not at module import) so importing headroom.proxy.server
     # in tests or library contexts does not silently attach a RotatingFileHandler
     # to the user's live proxy log. Multi-worker processes add their PID so
-    # same-port workers never share a RotatingFileHandler target.
+    # workers of one instance never share a RotatingFileHandler target.
     _setup_file_logging(
-        config.port,
+        config.instance_key,
         process_id=os.getpid() if config.worker_processes > 1 else None,
     )
 
@@ -3124,7 +3124,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     # once across all workers instead of N times.
     from headroom import paths as _hr_paths
 
-    _beacon_lock_path = _hr_paths.beacon_lock_path(config.port)
+    _beacon_lock_path = _hr_paths.beacon_lock_path(config.instance_key)
     _beacon_lock_fd: list = [None]  # mutable holder for the lock file descriptor
     _beacon_is_owner: list = [False]
 

@@ -7,6 +7,8 @@ Claude Code's Remote Control (GH #1779).
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import os
 import shutil
 import socket
@@ -534,3 +536,122 @@ def test_run_server_removes_the_socket_on_exit(sock_dir: Path) -> None:
         run_server(ProxyConfig(uds=str(target)), print_banner=False)
 
     assert not target.exists()
+
+
+# --------------------------------------------------------------------------
+# Per-instance state: a socket proxy is not identified by the port it ignores.
+# --------------------------------------------------------------------------
+
+
+@requires_core
+def test_instance_key_separates_socket_proxies_from_each_other_and_from_tcp() -> None:
+    from headroom.proxy.models import ProxyConfig
+
+    tcp = ProxyConfig(port=8787)
+    first = ProxyConfig(port=8787, uds="/tmp/hr-a/proxy.sock")
+    second = ProxyConfig(port=8787, uds="/tmp/hr-b/proxy.sock")
+
+    assert tcp.instance_key == 8787
+    keys = {tcp.instance_key, first.instance_key, second.instance_key}
+    assert len(keys) == 3
+    assert str(first.instance_key).startswith("uds-")
+
+
+@requires_core
+def test_socket_proxy_state_is_not_named_after_the_ignored_port(sock_dir: Path) -> None:
+    """`--uds X --port 8798` must not name its beacon lock or sidecar socket after 8798."""
+    from headroom import paths
+    from headroom.cli.proxy import default_embedding_socket
+    from headroom.proxy.models import ProxyConfig
+
+    config = ProxyConfig(port=8798, uds=str(sock_dir / "proxy.sock"))
+
+    assert "8798" not in paths.beacon_lock_path(config.instance_key).name
+    assert "8798" not in default_embedding_socket(config)
+    assert len(default_embedding_socket(config).encode()) < max_uds_path_length()
+
+
+@requires_uds
+@requires_core
+def test_relative_and_absolute_spellings_share_one_instance_key(
+    sock_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from headroom.proxy.models import ProxyConfig
+
+    monkeypatch.chdir(sock_dir)
+
+    relative = ProxyConfig(uds="proxy.sock").instance_key
+    absolute = ProxyConfig(uds=str(Path.cwd() / "proxy.sock")).instance_key
+
+    assert relative == absolute
+
+
+@requires_core
+def test_socket_proxy_runtime_log_is_keyed_by_instance(
+    sock_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--uds X --port 8798` must not write the runtime log of a TCP proxy on 8798."""
+    from headroom.proxy import server
+    from headroom.proxy.models import ProxyConfig
+
+    keys: list[int | str] = []
+    monkeypatch.setattr(
+        server, "_setup_file_logging", lambda key, process_id=None: keys.append(key)
+    )
+    config = ProxyConfig(port=8798, uds=str(sock_dir / "proxy.sock"))
+
+    server.create_app(config)
+
+    assert keys == [config.instance_key]
+
+
+def test_perf_reader_includes_a_socket_proxy_runtime_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from headroom import paths
+    from headroom.perf import analyzer
+
+    monkeypatch.setenv("HEADROOM_WORKSPACE_DIR", str(tmp_path))
+    log = paths.proxy_log_path("uds-" + hashlib.sha256(b"/run/proxy.sock").hexdigest())
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "2026-08-22 10:00:00,000 - headroom.proxy - INFO - [hr_uds] PERF model=model-UDS\n"
+    )
+
+    report = analyzer.parse_log_files(last_n_hours=0.0)
+
+    assert {r.request_id for r in report.perf_records} == {"hr_uds"}
+
+
+@requires_core
+def test_orphan_watchdog_reads_markers_for_its_own_instance(
+    sock_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A socket proxy must not stay alive on the wrap markers of a TCP proxy on its ignored port."""
+    from types import SimpleNamespace
+
+    from headroom.proxy import orphan_watchdog
+    from headroom.proxy.models import ProxyConfig
+
+    config = ProxyConfig(port=8798, uds=str(sock_dir / "proxy.sock"))
+    proxy = SimpleNamespace(
+        config=config,
+        ws_sessions=SimpleNamespace(active_count=lambda: 0),
+        active_request_count=0,
+        activity_generation=0,
+    )
+    keys: list[int | str] = []
+
+    def clients_dir(key: int | str) -> Path:
+        keys.append(key)
+        return tmp_path
+
+    monkeypatch.setattr(orphan_watchdog, "proxy_clients_dir", clients_dir)
+
+    asyncio.run(
+        orphan_watchdog.orphan_watchdog_loop(
+            proxy, grace_seconds=0.0, interval_seconds=0.0, stop=lambda: None
+        )
+    )
+
+    assert keys == [config.instance_key]
