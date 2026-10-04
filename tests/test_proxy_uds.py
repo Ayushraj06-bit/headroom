@@ -13,6 +13,7 @@ import os
 import shutil
 import socket
 import stat
+import subprocess
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -819,6 +820,31 @@ def test_module_entry_point_accepts_uds_and_refuses_it_with_a_port(sock_dir: Pat
 
 @requires_uds
 @requires_core
+def test_worker_config_from_the_payload_keeps_the_socket_identity(
+    sock_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker rebuilds the parent's config from the payload run_server exports."""
+    import json
+
+    from headroom.proxy.models import ProxyConfig
+    from headroom.proxy.server import (
+        _MULTI_WORKER_CONFIG_ENV,
+        _proxy_config_from_env,
+        _proxy_config_payload,
+    )
+
+    parent = ProxyConfig(uds=str(sock_dir / "proxy.sock"), worker_processes=2)
+    monkeypatch.delenv("HEADROOM_UDS", raising=False)
+    monkeypatch.setenv(_MULTI_WORKER_CONFIG_ENV, json.dumps(_proxy_config_payload(parent)))
+
+    worker = _proxy_config_from_env()
+
+    assert worker.uds == parent.uds
+    assert worker.instance_key == parent.instance_key
+
+
+@requires_uds
+@requires_core
 def test_worker_config_from_the_environment_reads_headroom_uds(
     sock_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -834,3 +860,210 @@ def test_worker_config_from_the_environment_reads_headroom_uds(
 
     assert worker.uds == target
     assert worker.instance_key == ProxyConfig(uds=target).instance_key
+
+
+# Two real workers each build the full app, which takes several seconds per worker.
+_MULTI_WORKER_DEADLINE_SECS = 90.0
+_MULTI_WORKER_COUNT = 2
+
+_MULTI_WORKER_CHILD = """
+import sys
+
+from headroom.proxy.server import ProxyConfig, run_server
+
+run_server(
+    ProxyConfig(
+        uds=sys.argv[1], disable_kompress=True, subscription_tracking_enabled=False
+    ),
+    workers=int(sys.argv[2]),
+    print_banner=False,
+)
+"""
+
+
+def _descendants(root: int) -> set[int]:
+    """Every live process below *root*, read from ``ps`` so it works on Linux and macOS."""
+    listing = subprocess.run(  # noqa: S603
+        ["ps", "-A", "-o", "pid=,ppid="],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    children: dict[int, list[int]] = {}
+    for line in listing.splitlines():
+        pid, ppid = (int(field) for field in line.split())
+        children.setdefault(ppid, []).append(pid)
+    found: set[int] = set()
+    pending = [root]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            found.add(child)
+            pending.append(child)
+    return found
+
+
+def _tcp_listeners(pids: set[int]) -> str:
+    """``lsof`` lines for any TCP socket in LISTEN state held by *pids*; empty when there are none."""
+    return subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "lsof",
+            "-nP",
+            "-a",
+            "-p",
+            ",".join(str(pid) for pid in sorted(pids)),
+            "-iTCP",
+            "-sTCP:LISTEN",
+        ],
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def _worker_logs(logs_dir: Path, instance_key: int | str) -> dict[int, Path]:
+    """Per-worker runtime logs by pid; each worker names its log after the instance key."""
+    prefix = f"proxy-{instance_key}-"
+    return {
+        int(log.name[len(prefix) : -len(".log")]): log for log in logs_dir.glob(f"{prefix}*.log")
+    }
+
+
+def _get_health(target: Path) -> int:
+    import httpx
+
+    with httpx.Client(transport=httpx.HTTPTransport(uds=str(target))) as client:
+        return client.get("http://localhost/health", timeout=10).status_code
+
+
+def _accepting(target: Path) -> bool:
+    """Whether a connection to *target* succeeds; a worker writes its log before it listens."""
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.connect(str(target))
+    except ConnectionRefusedError:
+        return False
+    finally:
+        probe.close()
+    return True
+
+
+def _wait_for_workers(
+    child: subprocess.Popen[bytes],
+    target: Path,
+    logs_dir: Path,
+    instance_key: int | str,
+    exclude: set[int],
+) -> set[int]:
+    """Wait until every worker is a live child with its own log and the socket accepts."""
+    import time
+
+    deadline = time.monotonic() + _MULTI_WORKER_DEADLINE_SECS
+    while True:
+        assert child.poll() is None, "the proxy exited before its workers started"
+        workers = (set(_worker_logs(logs_dir, instance_key)) & _descendants(child.pid)) - exclude
+        if len(workers) == _MULTI_WORKER_COUNT and _accepting(target):
+            return workers
+        assert time.monotonic() < deadline, f"workers never started; saw {workers}"
+        time.sleep(0.2)
+
+
+def _wait_until_every_worker_answers(
+    target: Path, logs: dict[int, Path], workers: set[int]
+) -> None:
+    """Send requests over the socket until each worker's own log records one."""
+    import time
+
+    deadline = time.monotonic() + _MULTI_WORKER_DEADLINE_SECS
+    while True:
+        assert _get_health(target) == 200
+        answered = {pid for pid in workers if "path=/health " in logs[pid].read_text()}
+        if answered == workers:
+            return
+        assert time.monotonic() < deadline, f"only {answered} of {workers} answered"
+
+
+@requires_uds
+@requires_core
+@pytest.mark.skipif(shutil.which("lsof") is None, reason="needs lsof to list TCP listeners")
+def test_workers_serve_one_owner_only_socket_and_no_tcp_port(sock_dir: Path) -> None:
+    """Every worker accepts on the parent's socket and runs under its socket identity.
+
+    Covers the whole multi-worker lifecycle: no process in the tree listens on TCP, the
+    socket stays 0600 across a worker restart, uvicorn replaces a worker killed with
+    SIGKILL on the same socket, and SIGTERM to the parent stops every worker and
+    removes the socket file.
+    """
+    import os
+    import signal
+    import sys
+    import time
+
+    from headroom.proxy.models import ProxyConfig
+
+    target = sock_dir / "h.sock"
+    workspace = sock_dir / "ws"
+    logs_dir = workspace / "logs"
+    instance_key = ProxyConfig(uds=str(target)).instance_key
+    env = dict(os.environ, HEADROOM_WORKSPACE_DIR=str(workspace), DO_NOT_TRACK="1")
+    env.pop("HEADROOM_PROXY_CONFIG_JSON", None)
+    # The proxy logs to stderr at INFO; a file never fills up and blocks it the way a pipe can.
+    stderr_log = sock_dir / "stderr.log"
+    with stderr_log.open("wb") as stderr:
+        child = subprocess.Popen(  # noqa: S603
+            [sys.executable, "-c", _MULTI_WORKER_CHILD, str(target), str(_MULTI_WORKER_COUNT)],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr,
+        )
+    try:
+        workers = _wait_for_workers(child, target, logs_dir, instance_key, exclude=set())
+        _wait_until_every_worker_answers(target, _worker_logs(logs_dir, instance_key), workers)
+
+        bound = target.lstat()
+        assert stat.S_IMODE(bound.st_mode) == 0o600
+        assert _tcp_listeners({child.pid} | _descendants(child.pid)) == ""
+        assert not list(logs_dir.glob(f"proxy-{ProxyConfig().port}*")), (
+            "a worker ran as a TCP proxy on the default port"
+        )
+
+        killed = min(workers)
+        os.kill(killed, signal.SIGKILL)
+        survivors = workers - {killed}
+        replacement = (
+            _wait_for_workers(child, target, logs_dir, instance_key, exclude={killed}) - survivors
+        )
+        assert len(replacement) == 1
+        _wait_until_every_worker_answers(
+            target, _worker_logs(logs_dir, instance_key), survivors | replacement
+        )
+
+        restarted = target.lstat()
+        assert (restarted.st_dev, restarted.st_ino) == (bound.st_dev, bound.st_ino)
+        assert stat.S_IMODE(restarted.st_mode) == 0o600
+        tree = {child.pid} | _descendants(child.pid)
+        assert _tcp_listeners(tree) == ""
+
+        child.send_signal(signal.SIGTERM)
+        returncode = child.wait(timeout=_MULTI_WORKER_DEADLINE_SECS)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+    # uvicorn's multi-worker supervisor returns normally after SIGTERM rather than
+    # re-raising it as a single uvicorn server does, over TCP as well as over a socket.
+    assert returncode == 0, stderr_log.read_text()
+    assert not target.exists(), "the socket file must not outlive the proxy"
+    deadline = time.monotonic() + _MULTI_WORKER_DEADLINE_SECS
+    while live := {pid for pid in tree - {child.pid} if _alive(pid)}:
+        assert time.monotonic() < deadline, f"workers outlived the parent: {live}"
+        time.sleep(0.2)
+
+
+def _alive(pid: int) -> bool:
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True

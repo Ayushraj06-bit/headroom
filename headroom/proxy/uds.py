@@ -349,6 +349,13 @@ def serving_uds(path: Path) -> Iterator[UdsListener]:
     way it would have (exit status 143 under the default handler). Off the main
     thread ``signal.signal`` is unavailable and uvicorn neither captures nor
     re-raises signals, so no handler is installed there.
+
+    With more than one worker, uvicorn's supervisor replaces this handler with its
+    own when it starts. On SIGTERM or SIGINT it stops every worker and returns
+    without re-raising, so the block exits normally, the file is still removed,
+    and the process exits 0, as a multi-worker proxy on a TCP port does. This
+    process keeps the listening descriptor open for the whole block, so a worker
+    the supervisor restarts inherits the same socket.
     """
     listener = bind_uds_listener(path)
     on_main_thread = threading.current_thread() is threading.main_thread()
