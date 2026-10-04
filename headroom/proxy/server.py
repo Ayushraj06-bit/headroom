@@ -6032,6 +6032,7 @@ def _proxy_config_from_env() -> ProxyConfig:
         rollout=rollout,
         host=_get_env_str("HEADROOM_HOST", "127.0.0.1"),
         port=_get_env_int("HEADROOM_PORT", 8787),
+        uds=os.environ.get("HEADROOM_UDS") or None,
         openai_api_url=os.environ.get("OPENAI_TARGET_API_URL"),
         anthropic_api_url=os.environ.get("ANTHROPIC_TARGET_API_URL"),
         anthropic_buffered_request_timeout_seconds=_get_env_int(

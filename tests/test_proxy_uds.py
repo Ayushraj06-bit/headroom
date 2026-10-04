@@ -810,3 +810,27 @@ def test_module_entry_point_accepts_uds_and_refuses_it_with_a_port(sock_dir: Pat
     )
     assert refused.returncode == 2
     assert "--uds cannot be combined with --port" in refused.stderr
+
+
+# --------------------------------------------------------------------------
+# Multiple workers: each uvicorn worker rebuilds the config and serves the socket.
+# --------------------------------------------------------------------------
+
+
+@requires_uds
+@requires_core
+def test_worker_config_from_the_environment_reads_headroom_uds(
+    sock_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a payload the worker reads HEADROOM_* variables, HEADROOM_UDS among them."""
+    from headroom.proxy.models import ProxyConfig
+    from headroom.proxy.server import _MULTI_WORKER_CONFIG_ENV, _proxy_config_from_env
+
+    target = str(sock_dir / "proxy.sock")
+    monkeypatch.delenv(_MULTI_WORKER_CONFIG_ENV, raising=False)
+    monkeypatch.setenv("HEADROOM_UDS", target)
+
+    worker = _proxy_config_from_env()
+
+    assert worker.uds == target
+    assert worker.instance_key == ProxyConfig(uds=target).instance_key
