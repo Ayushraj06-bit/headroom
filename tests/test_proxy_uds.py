@@ -1046,8 +1046,7 @@ def test_workers_serve_one_owner_only_socket_and_no_tcp_port(sock_dir: Path) -> 
         returncode = child.wait(timeout=_MULTI_WORKER_DEADLINE_SECS)
     finally:
         if child.poll() is None:
-            child.kill()
-            child.wait()
+            _kill_tree(child)
 
     # uvicorn's multi-worker supervisor returns normally after SIGTERM rather than
     # re-raising it as a single uvicorn server does, over TCP as well as over a socket.
@@ -1057,6 +1056,26 @@ def test_workers_serve_one_owner_only_socket_and_no_tcp_port(sock_dir: Path) -> 
     while live := {pid for pid in tree - {child.pid} if _alive(pid)}:
         assert time.monotonic() < deadline, f"workers outlived the parent: {live}"
         time.sleep(0.2)
+
+
+def _kill_tree(child: subprocess.Popen[bytes]) -> None:
+    """Stop *child* and every process under it.
+
+    uvicorn's workers outlive a supervisor killed with SIGKILL and keep serving the socket, so
+    killing only the parent would leak them. The supervisor is stopped first so it cannot
+    replace a worker while the workers are killed.
+    """
+    import os
+    import signal
+
+    os.kill(child.pid, signal.SIGSTOP)
+    for pid in _descendants(child.pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:  # it exited after the listing
+            pass
+    child.kill()
+    child.wait()
 
 
 def _alive(pid: int) -> bool:
