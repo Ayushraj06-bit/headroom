@@ -248,8 +248,8 @@ def test_inject_provider_config_keeps_the_users_models_and_options(
         encoding="utf-8",
     )
 
-    inject_opencode_provider_config(port=8787)
-    inject_opencode_provider_config(port=9999)
+    inject_opencode_provider_config(port=8787, keep_user_entries=True)
+    inject_opencode_provider_config(port=9999, keep_user_entries=True)
 
     config = _parse_json_loose(config_file.read_text())
     headroom = config["provider"]["headroom"]
@@ -261,6 +261,39 @@ def test_inject_provider_config_keeps_the_users_models_and_options(
     assert set(headroom["models"]) == {"deepseek-chat", "gpt-4o", "gpt-4.1"}
     assert headroom["models"]["deepseek-chat"] == {"name": "DeepSeek Chat"}
     assert config["provider"]["anthropic"] == {"options": {"timeout": 5}}
+
+
+def test_inject_provider_config_drops_user_entries_without_an_explicit_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a named upstream the proxy forwards to OpenAI, so a kept key would go there."""
+    _set_test_home(monkeypatch, tmp_path)
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "headroom": {
+                        "npm": "something-else",
+                        "options": {
+                            "apiKey": "{env:DEEPSEEK_API_KEY}",
+                            "baseURL": "https://api.deepseek.com/v1",
+                        },
+                        "models": {"deepseek-chat": {"name": "DeepSeek Chat"}},
+                    },
+                    "anthropic": {"options": {"timeout": 5}},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    inject_opencode_provider_config(port=8787)
+
+    headroom = _parse_json_loose(config_file.read_text())["provider"]["headroom"]
+    assert "apiKey" not in headroom["options"]
+    assert set(headroom["models"]) == {"gpt-4o", "gpt-4.1"}
 
 
 # ---------------------------------------------------------------------------

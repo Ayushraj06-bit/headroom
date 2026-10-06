@@ -201,9 +201,10 @@ API key to the proxy, and the proxy forwards it to DeepSeek. Make sure
 
 ### Models appear but requests fail
 
-You ran `headroom wrap opencode` without telling it about DeepSeek. Wrap keeps
-the `apiKey` and `models` entries from step 4, but the proxy it starts forwards
-OpenAI-compatible traffic to OpenAI unless you name another upstream. Pass
+You ran `headroom wrap opencode` without telling it about DeepSeek. Without an
+explicit upstream the proxy it starts forwards OpenAI-compatible traffic to
+OpenAI, so wrap leaves the `apiKey` and `models` entries from step 4 out of the
+`headroom` provider rather than send your DeepSeek key there. Pass
 `--openai-api-url` as shown in the next section, or launch OpenCode directly
 with `opencode` against the proxy you started in step 3.
 
@@ -247,8 +248,10 @@ that other clients may be sharing.
 - **Keep the step 4 provider entries.** OpenCode only offers the
   `headroom/<id>` models listed under `provider.headroom.models`, and DeepSeek
   needs your key in `options.apiKey` (for example `"{env:DEEPSEEK_API_KEY}"`).
-  Wrap keeps both and only rewrites the provider's `npm`, `name` and
-  `baseURL`.
+  With `--openai-api-url`, wrap keeps both. It rewrites the provider's `npm`,
+  `name` and `baseURL` and adds its default `gpt-4o` and `gpt-4.1` ids next to
+  your models. Without the flag it leaves your key and models out, because the
+  proxy would forward them to OpenAI.
 
 ### "headroom" command not found
 

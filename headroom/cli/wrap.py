@@ -8309,7 +8309,7 @@ def opencode(
     # Likewise refuse a reused proxy that cannot honor --openai-api-url before
     # touching OpenCode's config or registering a client marker; the same check
     # inside _ensure_proxy would only fire after those edits.
-    if no_proxy and openai_api_url:
+    if not prepare_only and no_proxy and openai_api_url:
         _require_no_proxy_openai_upstream(port, openai_api_url)
 
     # Snapshot OpenCode config.json BEFORE any wrap-time mutation so
@@ -8349,7 +8349,7 @@ def opencode(
         _inject_memory_agents_md(agents_md)
 
     if prepare_only:
-        inject_opencode_provider_config(port)
+        inject_opencode_provider_config(port, keep_user_entries=bool(openai_api_url))
         return
 
     # Past the prepare-only return the launch path always ran the binary check
@@ -8406,7 +8406,7 @@ def opencode(
         )
 
         # Inject Headroom provider into OpenCode config so traffic routes through proxy.
-        inject_opencode_provider_config(actual_port)
+        inject_opencode_provider_config(actual_port, keep_user_entries=bool(openai_api_url))
         if memory:
             mem_dir = Path.cwd() / ".headroom"
             _inject_memory_mcp_config(

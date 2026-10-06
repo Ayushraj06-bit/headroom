@@ -1563,6 +1563,86 @@ def test_wrap_opencode_no_proxy_rejects_a_mismatched_upstream_before_editing_con
     assert registered == []
 
 
+def _write_user_headroom_provider(tmp_path: Path) -> Path:
+    config_file = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "headroom": {
+                        "options": {"apiKey": "{env:DEEPSEEK_API_KEY}"},
+                        "models": {"deepseek-chat": {"name": "DeepSeek Chat"}},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config_file
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "kept"),
+    [(["--openai-api-url", "https://api.deepseek.com/v1"], True), ([], False)],
+)
+def test_wrap_opencode_keeps_the_users_headroom_key_only_for_an_explicit_upstream(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_args: list[str],
+    kept: bool,
+) -> None:
+    """Without --openai-api-url the proxy forwards to OpenAI, so a third-party key must not be kept."""
+    monkeypatch.delenv("OPENAI_TARGET_API_URL", raising=False)
+    config_file = _write_user_headroom_provider(tmp_path)
+
+    _capture_ensure_proxy_kwargs(
+        runner,
+        monkeypatch,
+        tmp_path,
+        ["wrap", "opencode", "--port", "9000", "--no-mcp", "--no-serena", *extra_args],
+    )
+
+    headroom = json.loads(config_file.read_text(encoding="utf-8"))["provider"]["headroom"]
+    assert ("apiKey" in headroom["options"]) is kept
+    assert ("deepseek-chat" in headroom["models"]) is kept
+    assert headroom["options"]["baseURL"] == "http://127.0.0.1:9000/v1"
+
+
+def test_wrap_opencode_prepare_only_does_not_need_the_no_proxy_listener(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--prepare-only never uses a proxy, so it must not insist one is already running."""
+    monkeypatch.delenv("OPENAI_TARGET_API_URL", raising=False)
+    monkeypatch.chdir(tmp_path)
+    _set_test_home(monkeypatch, tmp_path)
+    config_file = _write_user_headroom_provider(tmp_path)
+    monkeypatch.setattr(wrap_mod, "_check_proxy", lambda _port: False)
+
+    result = runner.invoke(
+        main,
+        [
+            "wrap",
+            "opencode",
+            "--port",
+            "9000",
+            "--no-mcp",
+            "--no-serena",
+            "--prepare-only",
+            "--no-proxy",
+            "--openai-api-url",
+            "https://api.deepseek.com/v1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    headroom = json.loads(config_file.read_text(encoding="utf-8"))["provider"]["headroom"]
+    assert headroom["options"]["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+
+
 def _has_control_chars(text: str) -> list[str]:
     return sorted({hex(ord(ch)) for ch in text if ord(ch) < 0x20 and ch not in "\n\t"})
 
