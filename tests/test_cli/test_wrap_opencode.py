@@ -1495,3 +1495,32 @@ def test_wrap_opencode_no_proxy_requires_openai_api_url_match(
     assert captured["no_proxy"] is True
     assert captured["openai_api_url"] == "https://api.deepseek.com/v1"
     assert captured["require_openai_api_url"] is True
+
+
+def _has_control_chars(text: str) -> list[str]:
+    return sorted({hex(ord(ch)) for ch in text if ord(ch) < 0x20 and ch not in "\n\t"})
+
+
+def test_opencode_help_keeps_its_unwrapped_examples(runner: CliRunner) -> None:
+    # Wide enough that a paragraph Click reflows would join these commands; at
+    # the default 80 columns the reflow can happen to break at the same places.
+    result = runner.invoke(
+        main, ["wrap", "opencode", "--help"], terminal_width=200, max_content_width=200
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _has_control_chars(result.output) == []
+    lines = [line.strip() for line in result.output.splitlines()]
+    # Click's no-rewrap marker must keep each example on its own line; without it
+    # the paragraph is reflowed and these commands are joined into prose.
+    assert "headroom wrap opencode --openai-api-url https://api.deepseek.com/v1" in lines
+    assert "OPENAI_TARGET_API_URL=https://api.deepseek.com/v1 headroom wrap opencode" in lines
+    assert "headroom wrap opencode --backend anyllm --anyllm-provider groq" in lines
+    assert 'provided". Point the proxy at the real upstream instead:' in lines
+
+
+def test_wrap_source_has_no_raw_control_bytes() -> None:
+    # In a normal docstring "\b" already becomes 0x08 at runtime, so --help cannot
+    # tell the escape from a raw 0x08 byte typed into the file. Check the bytes.
+    source = Path(wrap_mod.__file__).read_bytes().decode("utf-8")
+    assert _has_control_chars(source.replace("\r", "")) == []
