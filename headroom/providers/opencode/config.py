@@ -181,8 +181,9 @@ def append_headroom_plugin(config: dict[str, object]) -> bool:
 def inject_opencode_provider_config(port: int) -> None:
     """Inject a Headroom model provider into OpenCode's config file.
 
-    Safe to call multiple times — the injected block is fully replaced on
-    each call, so re-running with a different ``port`` updates the config.
+    Safe to call multiple times — Headroom's fields are rewritten on each call,
+    so re-running with a different ``port`` updates the config. Model ids and
+    options the user added under the ``headroom`` provider are kept.
     Before the first injection, the pre-wrap file is snapshotted to
     ``opencode.json.headroom-backup`` so ``headroom unwrap opencode``
     can restore it byte-for-byte.
@@ -207,7 +208,19 @@ def inject_opencode_provider_config(port: int) -> None:
             data = _parse_json_loose(content)
 
         # Merge provider into the JSON data structure.
-        provider = {"headroom": headroom_provider_entry(port)}
+        entry = headroom_provider_entry(port)
+        # Keep the user's own model ids and options (an apiKey, say) under the
+        # headroom provider. OpenCode only resolves `headroom/<id>` for listed
+        # ids, so dropping them leaves a third-party upstream with no usable
+        # model. Headroom still owns npm, name and baseURL.
+        providers = data.get("provider")
+        existing = providers.get("headroom") if isinstance(providers, dict) else None
+        if isinstance(existing, dict):
+            if isinstance(existing.get("options"), dict):
+                entry["options"] = {**existing["options"], **entry["options"]}
+            if isinstance(existing.get("models"), dict):
+                entry["models"] = {**entry["models"], **existing["models"]}
+        provider = {"headroom": entry}
         data = _inject_key_into_json(data, "provider", provider)
 
         # Write back as formatted JSON (opencode uses standard JSON with comments).

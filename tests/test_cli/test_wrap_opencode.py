@@ -1429,6 +1429,27 @@ def test_no_proxy_with_openai_api_url_reuses_matching_listener(
     ) == (None, 8787)
 
 
+def test_no_proxy_with_openai_api_url_still_warns_about_a_mode_mismatch(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reusing a matching upstream keeps the mode warning every other reuse path gives."""
+    health = _no_proxy_health("https://api.deepseek.com/v1")
+    health["config"]["mode"] = "cache"  # type: ignore[index]
+    monkeypatch.setenv("HEADROOM_MODE", "token")
+    monkeypatch.setattr(wrap_mod, "_check_proxy", lambda _port: True)
+    monkeypatch.setattr(wrap_mod, "_query_proxy_health", lambda _port: health)
+
+    wrap_mod._ensure_proxy_unlocked(
+        8787,
+        True,
+        openai_api_url="https://api.deepseek.com/v1",
+        require_openai_api_url=True,
+    )
+
+    out = capsys.readouterr().out
+    assert "requested 'token' mode but the running proxy is in 'cache' mode" in out
+
+
 def test_no_proxy_with_openai_api_url_rejects_mismatched_listener(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1475,6 +1496,13 @@ def test_wrap_opencode_no_proxy_requires_openai_api_url_match(
 ) -> None:
     """--no-proxy with an upstream override asks _ensure_proxy to fail closed on a mismatch."""
     monkeypatch.delenv("OPENAI_TARGET_API_URL", raising=False)
+    # A listener that already matches, so the up-front check lets the wrap through.
+    monkeypatch.setattr(wrap_mod, "_check_proxy", lambda _port: True)
+    monkeypatch.setattr(
+        wrap_mod,
+        "_query_proxy_health",
+        lambda _port: _no_proxy_health("https://api.deepseek.com/v1"),
+    )
     captured = _capture_ensure_proxy_kwargs(
         runner,
         monkeypatch,
@@ -1495,6 +1523,44 @@ def test_wrap_opencode_no_proxy_requires_openai_api_url_match(
     assert captured["no_proxy"] is True
     assert captured["openai_api_url"] == "https://api.deepseek.com/v1"
     assert captured["require_openai_api_url"] is True
+
+
+def test_wrap_opencode_no_proxy_rejects_a_mismatched_upstream_before_editing_config(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused --no-proxy upstream leaves OpenCode's config and the client markers alone."""
+    monkeypatch.delenv("OPENAI_TARGET_API_URL", raising=False)
+    monkeypatch.chdir(tmp_path)
+    _set_test_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(wrap_mod, "_check_proxy", lambda _port: True)
+    monkeypatch.setattr(wrap_mod, "_query_proxy_health", lambda _port: _no_proxy_health(None))
+    registered: list[int] = []
+    monkeypatch.setattr(wrap_mod, "_register_proxy_client", registered.append)
+
+    with (
+        patch.object(wrap_mod.shutil, "which", return_value="opencode"),
+        patch.object(wrap_mod, "_ensure_proxy", side_effect=AssertionError("must not be reached")),
+        patch.object(wrap_mod, "_launch_tool"),
+    ):
+        result = runner.invoke(
+            main,
+            [
+                "wrap",
+                "opencode",
+                "--port",
+                "9000",
+                "--no-proxy",
+                "--openai-api-url",
+                "https://api.deepseek.com/v1",
+            ],
+        )
+
+    assert result.exit_code != 0
+    assert "not https://api.deepseek.com/v1" in result.output
+    assert not (tmp_path / ".config" / "opencode").exists()
+    assert registered == []
 
 
 def _has_control_chars(text: str) -> list[str]:

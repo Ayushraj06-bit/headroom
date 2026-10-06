@@ -4019,7 +4019,7 @@ def _normalize_proxy_api_url(url: object, *, strip_provider_v1: bool = True) -> 
     return normalized or None
 
 
-def _require_no_proxy_openai_upstream(port: int, openai_api_url: str) -> None:
+def _require_no_proxy_openai_upstream(port: int, openai_api_url: str) -> dict[str, Any]:
     """Refuse ``--no-proxy`` unless the proxy on ``port`` already targets ``openai_api_url``.
 
     ``--no-proxy`` reuses a listener wrap does not own, so it can neither
@@ -4038,7 +4038,9 @@ def _require_no_proxy_openai_upstream(port: int, openai_api_url: str) -> None:
             f"the requested OpenAI-compatible upstream {openai_api_url}. "
             f"Start it separately with `{start_cmd}`, or drop --no-proxy so wrap can start it."
         )
-    running_config = helpers._proxy_health_config(helpers._query_proxy_health(port))
+    running_config: dict[str, Any] | None = helpers._proxy_health_config(
+        helpers._query_proxy_health(port)
+    )
     if running_config is None:
         running_config = helpers._query_proxy_config(port)
     if running_config is None:
@@ -4056,6 +4058,7 @@ def _require_no_proxy_openai_upstream(port: int, openai_api_url: str) -> None:
             f"Restart it with `{start_cmd}`, or drop --no-proxy so wrap can restart it "
             "when no other wrapper is attached."
         )
+    return running_config
 
 
 def _proxy_version(payload: dict[str, Any] | None) -> str | None:
@@ -5106,8 +5109,9 @@ def _ensure_proxy_unlocked(
         if require_openai_api_url and openai_api_url:
             # A user-chosen upstream cannot be applied to a proxy wrap does
             # not own; fail closed unless the running one already matches.
-            _require_no_proxy_openai_upstream(port, openai_api_url)
+            running_config = _require_no_proxy_openai_upstream(port, openai_api_url)
             click.echo(f"  Proxy on port {port} already targets {openai_api_url}")
+            _warn_proxy_mode_mismatch(running_config)
         elif not helpers._check_proxy(port):
             click.echo(f"  Warning: No proxy detected on port {port}")
         elif vertex_api_url or clear_vertex_api_url or os.environ.get("HEADROOM_MODE"):
@@ -8301,6 +8305,12 @@ def opencode(
             click.echo("Error: 'opencode' not found in PATH.")
             click.echo("Install OpenCode: https://opencode.ai")
             raise SystemExit(1)
+
+    # Likewise refuse a reused proxy that cannot honor --openai-api-url before
+    # touching OpenCode's config or registering a client marker; the same check
+    # inside _ensure_proxy would only fire after those edits.
+    if no_proxy and openai_api_url:
+        _require_no_proxy_openai_upstream(port, openai_api_url)
 
     # Snapshot OpenCode config.json BEFORE any wrap-time mutation so
     # `headroom unwrap opencode` can restore the user's pre-wrap state.

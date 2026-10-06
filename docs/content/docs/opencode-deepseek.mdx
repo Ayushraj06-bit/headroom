@@ -201,11 +201,11 @@ API key to the proxy, and the proxy forwards it to DeepSeek. Make sure
 
 ### Models appear but requests fail
 
-You ran `headroom wrap opencode` without telling it about DeepSeek. Wrap
-rewrites the `headroom` provider block in your OpenCode config on every run, so
-the manual `apiKey` / `models` entries from step 4 are replaced. Either launch
-OpenCode directly with `opencode` after configuring it manually as shown above,
-or use wrap with an explicit upstream — see the next section.
+You ran `headroom wrap opencode` without telling it about DeepSeek. Wrap keeps
+the `apiKey` and `models` entries from step 4, but the proxy it starts forwards
+OpenAI-compatible traffic to OpenAI unless you name another upstream. Pass
+`--openai-api-url` as shown in the next section, or launch OpenCode directly
+with `opencode` against the proxy you started in step 3.
 
 ### I used `headroom wrap opencode` and get "Incorrect API key provided"
 
@@ -244,9 +244,11 @@ that other clients may be sharing.
 - **Needs `--openai-api-url`** (or `OPENAI_TARGET_API_URL`) for any third-party
   OpenAI-compatible provider: DeepSeek, Together, OpenRouter, Groq, a
   self-hosted gateway, and so on.
-- **Use the manual setup in this guide** when you want to pin specific model
-  IDs, context limits, or display names in `opencode.json`, since wrap
-  regenerates the `headroom` provider block each time it runs.
+- **Keep the step 4 provider entries.** OpenCode only offers the
+  `headroom/<id>` models listed under `provider.headroom.models`, and DeepSeek
+  needs your key in `options.apiKey` (for example `"{env:DEEPSEEK_API_KEY}"`).
+  Wrap keeps both and only rewrites the provider's `npm`, `name` and
+  `baseURL`.
 
 ### "headroom" command not found
 
@@ -274,11 +276,6 @@ shaper is active immediately — the numbers just need calibration.
 ## What's NOT in this guide
 
 - **Claude or GPT models** — this setup uses DeepSeek exclusively
-- **`headroom wrap` with a custom model list** — wrap regenerates the
-  `headroom` provider block on every run, so the model entries below are lost.
-  If you prefer wrap, run
-  `headroom wrap opencode --openai-api-url https://api.deepseek.com/v1` and skip
-  the manual config
 - **Deprecated model names** — `deepseek-chat` and `deepseek-reasoner` are
   compatibility aliases slated for removal; use `deepseek-v4-pro` and
   `deepseek-v4-flash` instead
