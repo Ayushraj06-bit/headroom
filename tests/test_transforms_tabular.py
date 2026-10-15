@@ -17,6 +17,7 @@ from headroom.transforms.content_detector import (
     ContentType,
     DetectionResult,
     _is_md_separator,
+    _is_whole_markdown_table,
     _looks_like_prose,
     _try_detect_delimited,
     _try_detect_markdown_table,
@@ -110,6 +111,9 @@ _TABLE = (
     "| Publish | Maintainer | `make publish` |"
 )
 _PIPE_BULLET = "- Create an issue: `tracker new --type=bug|feature|task --priority=2`"
+_PIPELESS_TABLE = (
+    "Step | Owner | Command\n--- | --- | ---\nBuild | CI | make build\nTest | CI | make test"
+)
 # `cat` of a doc with a table, plus another command's output in the same result.
 _DOC_WITH_TABLE = (
     f"# Release checklist\n\n{_PROSE}\n\n{_TABLE}\n\n{_PIPE_BULLET}\n\n{_PROSE}\n"
@@ -130,6 +134,12 @@ _DOC_WITH_TABLE = (
         f"Title\n|---|---|\n{_TABLE}",
         # Past the 50 lines the detector samples.
         f"{_verbose_markdown(60)}\n\nTotal: 60 users",
+        # Lines with as many pipe fields as the header, straight after the rows:
+        # a list item, a note in another style, a second separator.
+        f"{_TABLE}\n{_PIPE_BULLET}",
+        f"{_TABLE}\nNote: pick one of bug|feature|task",
+        f"{_PIPELESS_TABLE}\n- Next: bug|feature|task",
+        f"{_TABLE}\n|---|---|---|\n| Ship | CI | `make ship` |",
     ],
     ids=[
         "doc_with_table",
@@ -138,6 +148,10 @@ _DOC_WITH_TABLE = (
         "pipe_line_before_table",
         "text_above_a_separator_row",
         "line_after_a_long_table",
+        "list_item_right_after_rows",
+        "note_without_leading_pipe",
+        "list_item_after_pipeless_rows",
+        "second_separator_row",
     ],
 )
 def test_markdown_table_inside_other_content_is_not_tabular(content: str) -> None:
@@ -146,13 +160,24 @@ def test_markdown_table_inside_other_content_is_not_tabular(content: str) -> Non
 
 @pytest.mark.parametrize(
     "content",
-    [f"{_TABLE}\n", f"\n\n{_TABLE}\n\n", _TABLE.replace("\n", "\r\n")],
-    ids=["trailing_newline", "surrounding_blank_lines", "crlf"],
+    [f"{_TABLE}\n", f"\n\n{_TABLE}\n\n", _TABLE.replace("\n", "\r\n"), _PIPELESS_TABLE],
+    ids=["trailing_newline", "surrounding_blank_lines", "crlf", "pipeless"],
 )
 def test_whole_markdown_table_is_still_tabular(content: str) -> None:
     result = detect_content_type(content)
     assert result.content_type is ContentType.TABULAR
     assert result.metadata.get("format") == "markdown"
+
+
+def test_csv_with_markdown_in_a_quoted_field_is_still_csv() -> None:
+    rows = "\n".join(f"{i},value_{i}" for i in range(1, 20))
+    csv = f'id,notes\n{rows}\n20,"| x | y |\n| --- | --- |\n| foo | bar |"\n21,value_21'
+    result = detect_content_type(csv)
+    assert result.content_type is ContentType.TABULAR
+    assert result.metadata.get("delimiter") == ","
+    headers, data, _fmt = parse_tabular(csv)
+    assert headers == ["id", "notes"]
+    assert len(data) == 21
 
 
 # Detection: fixed-width command output (#3652) ------------------------------
@@ -271,6 +296,12 @@ def test_is_md_separator_needs_two_columns() -> None:
     assert _is_md_separator("| --- | --- |")
     assert not _is_md_separator("| --- |")  # single column is not a separator
     assert not _is_md_separator("| a | b |")  # cells must be dashes
+
+
+def test_whole_markdown_table_needs_a_piped_header_then_a_separator() -> None:
+    assert _is_whole_markdown_table("| a | b |\n|---|---|\n| 1 | 2 |")
+    assert not _is_whole_markdown_table("| a | b |\n| 1 | 2 |\n| 3 | 4 |")
+    assert not _is_whole_markdown_table("Title\n|---|---|\na | b")
 
 
 def test_markdown_table_needs_multiple_columns() -> None:

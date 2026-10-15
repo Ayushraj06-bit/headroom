@@ -773,7 +773,14 @@ def _try_detect_tabular(content: str) -> DetectionResult | None:
         # The tabular compressor replaces the whole payload with the table's
         # rows, so a table with a heading, prose or other output around it is
         # not tabular content: every line outside the table would be dropped.
-        return md_result if _is_whole_markdown_table(content) else None
+        if _is_whole_markdown_table(content):
+            return md_result
+        # It can still be CSV holding markdown in a quoted field. Its pipes
+        # belong to that markdown, so they are never the delimiter here.
+        delimited = _try_detect_delimited(lines)
+        if delimited and delimited.metadata.get("delimiter") != "|":
+            return delimited
+        return None
 
     return _try_detect_delimited(lines)
 
@@ -782,14 +789,20 @@ def _is_whole_markdown_table(content: str) -> bool:
     """True when ``content`` is one markdown table and nothing else.
 
     A blank line ends a markdown table, so every line after the header and
-    separator has to be a row.
+    separator has to be a row: written in the header's leading-pipe style,
+    and neither another separator nor a list item. A note or a second table
+    straight after the rows means the content is not just the table.
     """
     rows = content.strip().split("\n")
-    return (
-        len(rows) >= 3
-        and "|" in rows[0]
-        and _is_md_separator(rows[1])
-        and all("|" in row for row in rows[2:])
+    if len(rows) < 3 or "|" not in rows[0] or not _is_md_separator(rows[1]):
+        return False
+    leading_pipe = rows[0].lstrip().startswith("|")
+    return all(
+        "|" in row
+        and row.lstrip().startswith("|") == leading_pipe
+        and not _is_md_separator(row)
+        and not _FIXED_WIDTH_LIST_RE.match(row)
+        for row in rows[2:]
     )
 
 
