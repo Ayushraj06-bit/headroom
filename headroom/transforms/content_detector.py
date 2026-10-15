@@ -770,9 +770,27 @@ def _try_detect_tabular(content: str) -> DetectionResult | None:
 
     md_result = _try_detect_markdown_table(lines)
     if md_result:
-        return md_result
+        # The tabular compressor replaces the whole payload with the table's
+        # rows, so a table with a heading, prose or other output around it is
+        # not tabular content: every line outside the table would be dropped.
+        return md_result if _is_whole_markdown_table(content) else None
 
     return _try_detect_delimited(lines)
+
+
+def _is_whole_markdown_table(content: str) -> bool:
+    """True when ``content`` is one markdown table and nothing else.
+
+    A blank line ends a markdown table, so every line after the header and
+    separator has to be a row.
+    """
+    rows = content.strip().split("\n")
+    return (
+        len(rows) >= 3
+        and "|" in rows[0]
+        and _is_md_separator(rows[1])
+        and all("|" in row for row in rows[2:])
+    )
 
 
 # Fixed-width (space-aligned) command output: `ls -l`, `ps aux`, `df -h`,

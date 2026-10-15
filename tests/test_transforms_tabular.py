@@ -95,6 +95,66 @@ def test_does_not_misroute_to_tabular(content: str, expected: ContentType) -> No
     assert detect_content_type(content).content_type is expected
 
 
+# Detection: a markdown table inside other content (#4215) -------------------
+
+_PROSE = "\n".join(
+    f"Paragraph {i}: this sentence is ordinary prose that an agent needs to read verbatim."
+    for i in range(12)
+)
+_TABLE = (
+    "| Step | Owner | Command |\n"
+    "|------|-------|---------|\n"
+    "| Build | CI | `make build` |\n"
+    "| Test | CI | `make test` |\n"
+    "| Tag | Maintainer | `git tag vX.Y.Z` |\n"
+    "| Publish | Maintainer | `make publish` |"
+)
+_PIPE_BULLET = "- Create an issue: `tracker new --type=bug|feature|task --priority=2`"
+# `cat` of a doc with a table, plus another command's output in the same result.
+_DOC_WITH_TABLE = (
+    f"# Release checklist\n\n{_PROSE}\n\n{_TABLE}\n\n{_PIPE_BULLET}\n\n{_PROSE}\n"
+    "----\n412 other-command-output.txt\n"
+)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        _DOC_WITH_TABLE,
+        f"Results:\n{_TABLE}",
+        # A blank line ends the table; a later line with pipes is not a row.
+        f"{_TABLE}\n\n{_PIPE_BULLET}",
+        # A line with pipes above the table is not its header.
+        f"{_PIPE_BULLET}\n{_TABLE}",
+        # Nor is text sitting on top of a separator row.
+        f"Title\n|---|---|\n{_TABLE}",
+        # Past the 50 lines the detector samples.
+        f"{_verbose_markdown(60)}\n\nTotal: 60 users",
+    ],
+    ids=[
+        "doc_with_table",
+        "heading_line",
+        "pipe_line_after_table",
+        "pipe_line_before_table",
+        "text_above_a_separator_row",
+        "line_after_a_long_table",
+    ],
+)
+def test_markdown_table_inside_other_content_is_not_tabular(content: str) -> None:
+    assert detect_content_type(content).content_type is not ContentType.TABULAR
+
+
+@pytest.mark.parametrize(
+    "content",
+    [f"{_TABLE}\n", f"\n\n{_TABLE}\n\n", _TABLE.replace("\n", "\r\n")],
+    ids=["trailing_newline", "surrounding_blank_lines", "crlf"],
+)
+def test_whole_markdown_table_is_still_tabular(content: str) -> None:
+    result = detect_content_type(content)
+    assert result.content_type is ContentType.TABULAR
+    assert result.metadata.get("format") == "markdown"
+
+
 # Detection: fixed-width command output (#3652) ------------------------------
 
 
@@ -422,6 +482,14 @@ def test_compact_unique_csv_passes_through() -> None:
     assert result.compressed == CSV
 
 
+def test_compress_keeps_a_document_with_a_table_whole() -> None:
+    # Only the table's rows used to come back, as JSON, with the prose and the
+    # other command's output silently gone.
+    result = TabularCompressor().compress(_DOC_WITH_TABLE)
+    assert not result.was_modified
+    assert result.compressed == _DOC_WITH_TABLE
+
+
 def test_non_tabular_passes_through_unmodified() -> None:
     # Unparseable prose returns the original content untouched.
     text = "just a normal paragraph here"
@@ -489,6 +557,12 @@ def test_router_keeps_ls_output_verbatim(monkeypatch) -> None:
     assert result.compressed == payload
     assert calls == []
     assert result.strategy_used is CompressionStrategy.TABULAR
+
+
+def test_router_does_not_route_a_document_with_a_table_to_tabular(monkeypatch) -> None:
+    _record_kompress_calls(monkeypatch)
+    result = ContentRouter(ContentRouterConfig()).compress(_DOC_WITH_TABLE)
+    assert result.strategy_used is not CompressionStrategy.TABULAR
 
 
 def test_router_does_not_kompress_a_ragged_csv(monkeypatch) -> None:
