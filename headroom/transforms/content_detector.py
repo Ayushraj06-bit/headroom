@@ -792,13 +792,23 @@ def _is_whole_markdown_table(content: str) -> bool:
     separator has to be a row: written in the header's leading-pipe style,
     and neither another separator nor a list item. A note or a second table
     straight after the rows means the content is not just the table.
+
+    Every row must also split into exactly the header's cells, the way the
+    tabular parser splits it, or the records built from it would truncate or
+    pad the row. The parser does not unescape ``\\|``, so a table that uses it
+    is left alone too.
     """
+    if "\\|" in content:
+        return False
     rows = content.strip().split("\n")
-    if len(rows) < 3 or "|" not in rows[0] or not _is_md_separator(rows[1]):
+    if len(rows) < 3 or not _is_md_separator(rows[1]):
+        return False
+    cols = _md_cell_count(rows[0])
+    if cols < 2:
         return False
     leading_pipe = rows[0].lstrip().startswith("|")
     return all(
-        "|" in row
+        _md_cell_count(row) == cols
         and row.lstrip().startswith("|") == leading_pipe
         and not _is_md_separator(row)
         and not _FIXED_WIDTH_LIST_RE.match(row)

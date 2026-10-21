@@ -169,6 +169,35 @@ def test_whole_markdown_table_is_still_tabular(content: str) -> None:
     assert result.metadata.get("format") == "markdown"
 
 
+_LONG_ROWS = [(f"step_{i}", f"ok_{i}") for i in range(40)]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Name | Value\n--- | ---\n"
+        + "\n".join(f"{a} | {b}" for a, b in _LONG_ROWS)
+        + "\nImportant: use x | y | DO_NOT_DELETE",
+        "| Name | Value |\n| --- | --- |\n"
+        + "\n".join(f"| {a} | {b} |" for a, b in _LONG_ROWS)
+        + "\n| Important: use x | y | DO_NOT_DELETE |",
+        # Splitting on the escaped pipe gives the header's three cells, but the
+        # literal `|` would be lost.
+        "| Name | Value | Note |\n| --- | --- | --- |\n"
+        + "\n".join(f"| {a} | {b} | none |" for a, b in _LONG_ROWS)
+        + "\n| `a \\| b` | DO_NOT_DELETE |",
+    ],
+    ids=["over_width_row_pipeless", "over_width_row_piped", "escaped_pipe"],
+)
+def test_table_with_a_row_records_cannot_hold_is_kept_whole(content: str) -> None:
+    # Not claimed as markdown. Aligned rows may still read as fixed-width, which
+    # splits only on whitespace runs and passes ragged rows through.
+    assert detect_content_type(content).metadata.get("format") != "markdown"
+    result = TabularCompressor().compress(content)
+    assert not result.was_modified
+    assert result.compressed == content
+
+
 def test_csv_with_markdown_in_a_quoted_field_is_still_csv() -> None:
     rows = "\n".join(f"{i},value_{i}" for i in range(1, 20))
     csv = f'id,notes\n{rows}\n20,"| x | y |\n| --- | --- |\n| foo | bar |"\n21,value_21'
@@ -302,6 +331,7 @@ def test_whole_markdown_table_needs_a_piped_header_then_a_separator() -> None:
     assert _is_whole_markdown_table("| a | b |\n|---|---|\n| 1 | 2 |")
     assert not _is_whole_markdown_table("| a | b |\n| 1 | 2 |\n| 3 | 4 |")
     assert not _is_whole_markdown_table("Title\n|---|---|\na | b")
+    assert not _is_whole_markdown_table("Title\n|---|---|\nfoo\nbar")
 
 
 def test_markdown_table_needs_multiple_columns() -> None:
