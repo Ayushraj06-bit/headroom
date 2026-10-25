@@ -150,10 +150,6 @@ def parse_tabular(
 
     if not headers or not rows:
         return None
-    # Records key every cell by its header, so a repeated header (after the
-    # parsers strip whitespace) would keep only the last of its columns.
-    if len(set(headers)) != len(headers):
-        return None
     # Ragged tables (rows whose cell count differs from the header count)
     # can't be zipped into records without shifting values under the wrong
     # column — a compressed table must never state facts the original
