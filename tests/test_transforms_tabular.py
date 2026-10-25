@@ -198,6 +198,30 @@ def test_table_with_a_row_records_cannot_hold_is_kept_whole(content: str) -> Non
     assert result.compressed == content
 
 
+_KEEP_ROWS = range(40)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "| Name | Name |\n| --- | --- |\n"
+        + "\n".join(f"| DO_NOT_DELETE_{i} | value_{i} |" for i in _KEEP_ROWS),
+        # Equal once the parser strips each cell.
+        "| Name |   Name   |\n| --- | --- |\n"
+        + "\n".join(f"| DO_NOT_DELETE_{i} | value_{i} |" for i in _KEEP_ROWS),
+        "name,name\n" + "\n".join(f"DO_NOT_DELETE_{i},value_{i}" for i in _KEEP_ROWS),
+        "name, name \n" + "\n".join(f"DO_NOT_DELETE_{i},value_{i}" for i in _KEEP_ROWS),
+    ],
+    ids=["markdown", "markdown_whitespace", "csv", "csv_whitespace"],
+)
+def test_table_with_repeated_headers_is_kept_whole(content: str) -> None:
+    # Records key cells by header, so the second column would overwrite the first.
+    assert parse_tabular(content) is None
+    result = TabularCompressor().compress(content)
+    assert not result.was_modified
+    assert result.compressed == content
+
+
 def test_csv_with_markdown_in_a_quoted_field_is_still_csv() -> None:
     rows = "\n".join(f"{i},value_{i}" for i in range(1, 20))
     csv = f'id,notes\n{rows}\n20,"| x | y |\n| --- | --- |\n| foo | bar |"\n21,value_21'
