@@ -1397,11 +1397,20 @@ class ToolIntelligenceNetwork:
         patterns_data = data.get("patterns", {})
         source_instance = data.get("instance_id", "unknown")
 
+        skipped = 0
+        first_error: Exception | None = None
         with self._lock:
             for serialized_key, pattern_dict in patterns_data.items():
-                key = _deserialize_pattern_key(serialized_key)
-                imported = ToolPattern.from_dict(pattern_dict)
-                self._sanitize_loaded_pattern(imported)
+                try:
+                    key = _deserialize_pattern_key(serialized_key)
+                    imported = ToolPattern.from_dict(pattern_dict)
+                    self._sanitize_loaded_pattern(imported)
+                except (AttributeError, TypeError, ValueError) as e:
+                    # One unreadable entry must not abort the rest: the store
+                    # that did load would be saved over the whole file.
+                    skipped += 1
+                    first_error = first_error or e
+                    continue
                 # Make sure dataclass fields agree with the dict key — pre-F3
                 # dumps don't carry tenant_key on the pattern, and pre-B5
                 # dumps don't carry auth_mode/model_family either; promote
@@ -1430,6 +1439,18 @@ class ToolIntelligenceNetwork:
 
             self._prune_patterns_locked()
             self._dirty = True
+
+        if first_error is not None:
+            logger.warning(
+                "TOIN skipped malformed patterns on import",
+                extra={
+                    "event": "toin_import_skipped",
+                    "skipped": skipped,
+                    "imported": len(patterns_data) - skipped,
+                    "error_type": type(first_error).__name__,
+                    "error": str(first_error),
+                },
+            )
 
     def _merge_patterns(self, existing: ToolPattern, imported: ToolPattern) -> None:
         """Merge imported pattern into existing."""

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
+
+import pytest
 
 from headroom.telemetry.backends.filesystem import FileSystemTOINBackend
 from headroom.telemetry.models import ToolSignature
@@ -81,6 +84,80 @@ def test_legacy_raw_query_keys_are_removed_on_load(tmp_path) -> None:
 
     assert pattern.query_pattern_frequency == {"status:* user:*": 2}
     assert pattern.common_query_patterns == ["status:* user:*"]
+
+
+def _record(toin: ToolIntelligenceNetwork, index: int) -> None:
+    toin.record_compression(
+        tool_signature=_signature(index),
+        original_count=10,
+        compressed_count=5,
+        original_tokens=100,
+        compressed_tokens=50,
+        strategy="test",
+    )
+
+
+def _saved_store(path, count: int) -> dict:
+    toin = ToolIntelligenceNetwork(TOINConfig(storage_path=str(path), auto_save_interval=0))
+    for index in range(count):
+        _record(toin, index)
+    toin.save()
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _skip_warnings(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if getattr(r, "event", None) == "toin_import_skipped"]
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        lambda entry: {k: v for k, v in entry.items() if k != "tool_signature_hash"},
+        lambda entry: {**entry, "field_semantics": {"field_1": "not a dict"}},
+        lambda entry: {**entry, "query_pattern_frequency": "not a dict"},
+        lambda entry: {**entry, "query_pattern_frequency": {"status:*": "many"}},
+        lambda entry: "not a pattern",
+    ],
+    ids=[
+        "missing_signature_hash",
+        "bad_field_semantics",
+        "bad_query_frequencies",
+        "bad_query_count",
+        "not_a_dict",
+    ],
+)
+def test_malformed_pattern_does_not_drop_the_rest_of_the_store(tmp_path, caplog, corrupt) -> None:
+    path = tmp_path / "toin.json"
+    data = _saved_store(path, 5)
+    keys = list(data["patterns"])
+    data["patterns"][keys[1]] = corrupt(data["patterns"][keys[1]])
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="headroom.telemetry.toin"):
+        toin = ToolIntelligenceNetwork(TOINConfig(storage_path=str(path), auto_save_interval=0))
+
+    assert len(toin._patterns) == 4
+    [warning] = _skip_warnings(caplog)
+    assert warning.skipped == 1
+    assert warning.imported == 4
+
+    # The next save used to write only the patterns read before the bad one.
+    _record(toin, 99)
+    toin.save()
+    saved = json.loads(path.read_text(encoding="utf-8"))["patterns"]
+    assert set(keys) - {keys[1]} <= set(saved)
+    assert len(saved) == 5
+
+
+def test_valid_store_loads_without_a_skip_warning(tmp_path, caplog) -> None:
+    path = tmp_path / "toin.json"
+    _saved_store(path, 5)
+
+    with caplog.at_level(logging.WARNING, logger="headroom.telemetry.toin"):
+        toin = ToolIntelligenceNetwork(TOINConfig(storage_path=str(path), auto_save_interval=0))
+
+    assert len(toin._patterns) == 5
+    assert _skip_warnings(caplog) == []
 
 
 def test_filesystem_backend_writes_compact_json(tmp_path) -> None:
